@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "httpx>=0.27"]  # httpx backs fastapi's TestClient
 
 [project.scripts]
 rsupport = "rsupport.cli:main"

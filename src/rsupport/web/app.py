@@ -136,9 +136,9 @@ def api_model(file: UploadFile = File(...)) -> dict:
 
 @app.post("/api/orient/{sid}")
 def api_orient(sid: str, req: OrientRequest) -> dict:
+    session = _get(sid)
     from .. import orient as orient_mod
 
-    session = _get(sid)
     session.params = _resolve_params(session, req)
 
     t0 = time.perf_counter()
@@ -166,9 +166,9 @@ def api_orient(sid: str, req: OrientRequest) -> dict:
 
 @app.post("/api/points/{sid}")
 def api_points(sid: str, req: PointsRequest) -> dict:
+    session = _get(sid)
     from .. import sampling
 
-    session = _get(sid)
     session.params = _resolve_params(session, req)
     if session.oriented is None:
         raise HTTPException(409, "orient the model first")
@@ -184,9 +184,9 @@ def api_points(sid: str, req: PointsRequest) -> dict:
 
 @app.post("/api/supports/{sid}")
 def api_supports(sid: str, req: SupportsRequest) -> dict:
+    session = _get(sid)
     from .. import supports as supports_mod
 
-    session = _get(sid)
     session.params = _resolve_params(session, req)
     if session.oriented is None:
         raise HTTPException(409, "orient the model first")
