@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# working output
+out/
+*.out.stl
+*.out.3mf
+uploads/
+
+# large sample meshes — keep only tiny synthetic ones
+samples/*.stl
+!samples/synthetic_*.stl
+
+# vendored, fetched by scripts/fetch_three.py
+src/rsupport/web/static/three.module.js
