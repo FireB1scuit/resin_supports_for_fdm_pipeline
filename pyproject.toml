@@ -17,6 +17,7 @@ dependencies = [
     # NOT rtree/embree — see CLAUDE.md.
     "networkx>=3.0",
     "lxml>=5.0",
+    "mapbox-earcut>=1.0",  # trimesh's polygon triangulation engine
     "fastapi>=0.110",
     "uvicorn>=0.27",
     "python-multipart>=0.0.9",

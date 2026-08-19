@@ -121,6 +121,15 @@
   .busy { position: absolute; inset: 0; z-index: 6; display: none; place-items: center;
           background: rgba(20,22,26,.55); }
   .busy.on { display: grid; }
+
+  /* A fixed 296px panel eats a narrow window alive — at 430px the viewport is
+     left with 130px of canvas. Shrink, then stack. */
+  @media (max-width: 900px) { body { grid-template-columns: 1fr 244px; } }
+  @media (max-width: 680px) {
+    body { grid-template-columns: 1fr; grid-template-rows: minmax(240px, 50vh) 1fr; }
+    aside { border-left: none; border-top: 1px solid var(--line); }
+    #legend { display: none; }
+  }
   .spinner {
     width: 26px; height: 26px; border-radius: 50%;
     border: 2.5px solid var(--line); border-top-color: var(--accent);
