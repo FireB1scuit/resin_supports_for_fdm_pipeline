@@ -92,14 +92,18 @@ def cmd_orient(args) -> int:
 
 
 def cmd_supports(args) -> int:
-    from . import orient as orient_mod
     from . import sampling, supports
 
     params = _params_from_args(args)
     mesh = mesh_io.load(args.input)
     print(f"loaded {len(mesh.faces):,} faces")
 
-    if not args.no_orient:
+    # The model arrives already posed the way it should print. All we do is set
+    # it on the bed. Auto-orientation is available behind --auto-orient, but it
+    # is a taste judgement and the file's own pose is the better default.
+    if args.auto_orient:
+        from . import orient as orient_mod
+
         t0 = time.perf_counter()
         results = orient_mod.orientations(mesh, params, top_k=3)
         chosen = results[min(args.pick, len(results) - 1)]
@@ -153,12 +157,16 @@ def build_parser() -> argparse.ArgumentParser:
     _add_param_args(po)
     po.set_defaults(func=cmd_orient)
 
-    ps = sub.add_parser("supports", help="orient, place supports, export")
+    ps = sub.add_parser("supports", help="place supports on a pre-posed model and export")
     ps.add_argument("input")
     ps.add_argument("-o", "--output", required=True)
     ps.add_argument("--mode", default="auto", choices=["auto", "combined", "separate", "3mf"])
-    ps.add_argument("--no-orient", action="store_true", help="keep the model's existing pose")
-    ps.add_argument("--pick", type=int, default=0)
+    ps.add_argument(
+        "--auto-orient",
+        action="store_true",
+        help="re-pose the model first (off by default: the file's own pose is used)",
+    )
+    ps.add_argument("--pick", type=int, default=0, help="with --auto-orient, use the Nth candidate")
     _add_param_args(ps)
     ps.set_defaults(func=cmd_supports)
 

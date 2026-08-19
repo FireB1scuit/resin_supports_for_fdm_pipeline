@@ -227,8 +227,15 @@ async function upload(file) {
       info.summary.size.map(v => v.toFixed(1)).join(' × ') + ' mm';
     if (!info.summary.watertight) log('mesh is not watertight; results may be rough', 'w');
     $('drop').classList.add('hide');
+    $('autorotate').disabled = false;
+    $('asloaded').disabled = false;
 
-    await runOrient();
+    // The file is taken as posed. It arrives already dropped onto the bed, so
+    // there is nothing to decide — go straight to working out where supports go.
+    await loadSTL(`/api/mesh/${state.sid}/model`, 'model');
+    frameModel();
+    log('using the pose from the file', 'g');
+
     await runPoints();
     await runSupports();
   } catch (err) {
@@ -238,17 +245,35 @@ async function upload(file) {
   }
 }
 
-async function runOrient(pick = 0) {
-  log('finding print orientation …');
-  const r = await postJSON(`/api/orient/${state.sid}`, { pick, overrides: overrides() });
+/** Opt-in only. Off the default path — see the orientation panel. */
+async function runOrient(pick = 0, skip = false) {
+  log(skip ? 'restoring the file’s pose …' : 'searching for a better orientation …');
+  const r = await postJSON(`/api/orient/${state.sid}`, { pick, skip, overrides: overrides() });
   state.orientations = r.orientations;
   state.applied = r.applied;
   renderOrientations();
   await loadSTL(`/api/mesh/${state.sid}/model`, 'model');
   frameModel();
-  const label = r.orientations[r.applied]?.label ?? 'as loaded';
-  log(`oriented "${label}" in ${r.elapsed.toFixed(2)}s`, 'g');
+  const label = r.orientations[r.applied]?.label ?? 'the file’s pose';
+  log(`using ${label} (${r.elapsed.toFixed(2)}s)`, 'g');
 }
+
+async function reorient(pick, skip) {
+  if (!state.sid || state.busy) return;
+  busy(true);
+  try {
+    await runOrient(pick, skip);
+    await runPoints();
+    await runSupports();
+  } catch (err) {
+    log(`error: ${err.message}`, 'e');
+  } finally {
+    busy(false);
+  }
+}
+
+$('autorotate').onclick = () => reorient(0, false);
+$('asloaded').onclick = () => reorient(0, true);
 
 async function runPoints() {
   log('placing support points …');
@@ -299,20 +324,14 @@ async function rerun(scope) {
 function renderOrientations() {
   const host = $('orients');
   host.innerHTML = '';
-  if (!state.orientations.length) { host.innerHTML = '<span style="color:var(--dim)">as loaded</span>'; return; }
+  if (!state.orientations.length) return;
 
   state.orientations.forEach((o, i) => {
     const b = document.createElement('button');
     b.className = 'orient' + (i === state.applied ? ' on' : '');
     b.innerHTML = `<span>${o.label || 'candidate ' + i}</span><small>${o.score.toFixed(3)}</small>`;
     b.title = Object.entries(o.terms).map(([k, v]) => `${k}: ${v.toFixed(3)}`).join('\n');
-    b.onclick = async () => {
-      if (state.busy) return;
-      busy(true);
-      try { await runOrient(i); await runPoints(); await runSupports(); }
-      catch (err) { log(`error: ${err.message}`, 'e'); }
-      finally { busy(false); }
-    };
+    b.onclick = () => reorient(i, false);
     host.appendChild(b);
   });
 }

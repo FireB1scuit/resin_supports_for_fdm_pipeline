@@ -13,8 +13,12 @@ is a Blender add-on that *thickens supports that already exist* — it cannot he
 with a model that came bare.
 
 This does the other half: it generates the supports itself, at FDM dimensions,
-on any model. And it picks the print orientation first, because where the
-supports have to go is decided by how the model is standing.
+on any model.
+
+Models are taken **as posed in the file** — rotate it how you want it printed
+before you drop it in, and the pipeline just sets it down on the bed. There is
+an experimental auto-orient button, but choosing a print pose is a judgement
+call and yours beats a scoring function's.
 
 ## The support spec
 

@@ -47,8 +47,12 @@ If a push to `main` is ever attempted, stop and open a PR instead.
 - **The self-printability invariant is non-negotiable**: generated support geometry must
   never contain an overhang steeper than the printable limit. If our supports would need
   supports, the generator is broken. `tests/test_supports.py` enforces this.
-- Geometry stages stay separate: `orient` → `points` → `geometry`. The UI edits the point
-  list between stages, so stage 3 must be cheap to re-run alone.
+- **Models arrive pre-posed.** The input STL is assumed to already be rotated the way it
+  should print; the pipeline only sets it down on the bed. Auto-orientation exists in
+  `orient.py` but is **opt-in** (`--auto-orient`, or the button in the UI) and must never
+  be on the default path.
+- Geometry stages stay separate: `points` → `geometry` (with `orient` optional in front).
+  The UI edits the point list between stages, so stage 3 must be cheap to re-run alone.
 - Run `pytest` before pushing.
 
 ## Layout
