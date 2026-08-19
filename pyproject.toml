@@ -13,6 +13,10 @@ dependencies = [
     "scipy>=1.11",
     "trimesh>=4.0",
     "shapely>=2.0",
+    # trimesh needs these for scene handling and reading 3MF back. Deliberately
+    # NOT rtree/embree — see CLAUDE.md.
+    "networkx>=3.0",
+    "lxml>=5.0",
     "fastapi>=0.110",
     "uvicorn>=0.27",
     "python-multipart>=0.0.9",
