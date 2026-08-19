@@ -187,6 +187,7 @@
       <div class="row">
         <label for="style">style</label>
         <select id="style" style="width:auto">
+          <option value="resin">resin scaffold</option>
           <option value="tree">tree</option>
           <option value="pillar">pillars</option>
         </select>
@@ -201,9 +202,16 @@
         <input type="range" id="merge" min="0" max="1" step=".05">
         <output id="merge_v"></output>
       </div>
-      <p class="tree-only" style="color:var(--dim); font-size:11px; margin:2px 0 0">
-        Branches merge on the way down and route around the model, preferring the
-        plate to landing on it.
+      <div class="row resin-only">
+        <label for="parenting">parenting</label>
+        <input type="range" id="parenting" min="0" max="1" step=".05">
+        <output id="parenting_v"></output>
+      </div>
+      <p style="color:var(--dim); font-size:11px; margin:2px 0 0">
+        <span class="resin-only">SLA scaffold: tips on angled arms, thin vertical
+        shafts, cross-linked. Parenting is how many tips share a shaft.</span>
+        <span class="tree-only">Branches merge on the way down into thicker trunks.</span>
+        <span class="pillar-only">One straight column per contact.</span>
       </p>
     </section>
 

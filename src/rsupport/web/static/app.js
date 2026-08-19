@@ -191,14 +191,17 @@ function overrides() {
     support_style: $('style').value,
     branch_angle_deg: +$('branch').value,
     merge_strength: +$('merge').value,
+    parenting: +$('parenting').value,
   };
 }
 
 /** Branch controls mean nothing to the pillar generator, and vice versa. */
 function syncStyleVisibility() {
-  const tree = $('style').value === 'tree';
-  document.querySelectorAll('.tree-only').forEach(el => el.style.display = tree ? '' : 'none');
-  document.querySelectorAll('.pillar-only').forEach(el => el.style.display = tree ? 'none' : '');
+  const style = $('style').value;
+  for (const kind of ['resin', 'tree', 'pillar']) {
+    document.querySelectorAll('.' + kind + '-only')
+      .forEach(el => el.style.display = (style === kind) ? '' : 'none');
+  }
 }
 
 function syncSliders(p) {
@@ -212,6 +215,7 @@ function syncSliders(p) {
   if (p.support_style) $('style').value = p.support_style;
   if (p.branch_angle_deg != null) $('branch').value = p.branch_angle_deg;
   if (p.merge_strength != null) $('merge').value = p.merge_strength;
+  if (p.parenting != null) $('parenting').value = p.parenting;
   syncStyleVisibility();
   showSliderValues();
 }
@@ -223,8 +227,9 @@ function showSliderValues() {
   $('overhang_v').textContent = $('overhang').value + '°';
   $('branch_v').textContent = $('branch').value + '°';
   $('merge_v').textContent = (+$('merge').value).toFixed(2);
+  $('parenting_v').textContent = (+$('parenting').value).toFixed(2);
 }
-['tip', 'pillar', 'spacing', 'overhang', 'branch', 'merge']
+['tip', 'pillar', 'spacing', 'overhang', 'branch', 'merge', 'parenting']
   .forEach(id => $(id).addEventListener('input', showSliderValues));
 
 // ---------------------------------------------------------------- pipeline
@@ -314,7 +319,7 @@ async function runSupports() {
   });
   rebuildMarkers();
 
-  const joins = ($('style').value === 'tree') ? 'merges' : 'braces';
+  const joins = { resin: 'links', tree: 'merges', pillar: 'braces' }[$('style').value];
   $('stats').innerHTML =
     `<b>${r.points}</b> supports &middot; <b>${r.braces}</b> ${joins}<br>` +
     `<b>${r.faces.toLocaleString()}</b> triangles` +
@@ -413,7 +418,7 @@ document.querySelectorAll('[data-toggle]').forEach(btn => {
 ['spacing', 'overhang'].forEach(id => $(id).addEventListener('change', () => rerun('points')));
 $('tipstyle').addEventListener('change', () => rerun('geometry'));
 $('braces').addEventListener('change', () => rerun('geometry'));
-['branch', 'merge'].forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
+['branch', 'merge', 'parenting'].forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
 $('style').addEventListener('change', () => { syncStyleVisibility(); rerun('geometry'); });
 $('preset').addEventListener('change', async () => {
   if (!state.sid || state.busy) return;

@@ -17,7 +17,7 @@ from typing import Literal
 import numpy as np
 
 TipStyle = Literal["conical", "spherical"]
-SupportStyle = Literal["tree", "pillar"]
+SupportStyle = Literal["resin", "tree", "pillar"]
 
 
 @dataclass(frozen=True)
@@ -41,7 +41,22 @@ class SupportParams:
     tip_style: TipStyle = "conical"
 
     # --- structure ---
-    support_style: SupportStyle = "tree"
+    support_style: SupportStyle = "resin"
+
+    # --- resin scaffold ---
+    # An SLA support is base -> join cone -> vertical shaft -> angled arm ->
+    # tip. The shaft stays thin the whole way, tapering slightly upward; it
+    # does not thicken into a trunk.
+    shaft_upper_diameter: float = 0.7
+    shaft_lower_diameter: float = 1.2
+    arm_diameter: float = 0.6
+    # How far an arm may lean off vertical on its way up to a contact.
+    arm_angle_deg: float = 45.0
+    # 0 = one shaft per contact. 1 = arms reach far to share a shaft, so there
+    # are far fewer shafts standing on the plate.
+    parenting: float = 0.5
+    # Vertical spacing of the cross-links that tie shafts into a scaffold.
+    brace_interval: float = 8.0
 
     # --- pillar ---
     pillar_diameter: float = 1.2

@@ -78,6 +78,12 @@ def from_nozzle(
         # A trunk carrying a dozen branches needs real section, but past this
         # it stops being removable by hand.
         max_branch_diameter=round(pillar * 2.5, 3),
+        # --- resin scaffold ---
+        # Resin shafts run roughly 0.6 mm at the top to 1.2 mm at the bottom.
+        # The ratio carries over; the absolute sizes come from the nozzle.
+        shaft_upper_diameter=round(max(n * 3.0, pillar * 0.55), 3),
+        shaft_lower_diameter=round(pillar, 3),
+        arm_diameter=round(max(n * 2.5, pillar * 0.5), 3),
     )
     return params.with_(**overrides)
 

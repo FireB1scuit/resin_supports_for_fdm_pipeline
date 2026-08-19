@@ -23,7 +23,8 @@ from rsupport.raycast import DownRay
 from rsupport.tree import AvoidanceField, _descend, build_tree
 from test_supports import bracket, down_point, printability_report, table
 
-PARAMS = presets.from_nozzle(0.2)
+# Trees are a selectable style, not the default any more — resin is.
+PARAMS = presets.from_nozzle(0.2).with_(support_style="tree")
 
 
 def grow(model, points, params=None):
@@ -264,16 +265,18 @@ def test_no_points_means_no_geometry():
     assert len(build_tree(model, [], PARAMS).mesh.faces) == 0
 
 
-def test_build_supports_uses_the_tree_by_default():
+def test_build_supports_dispatches_on_style():
     from rsupport.supports import build_supports
 
     model = mesh_io.drop_to_bed(table(bar_z=12.0))
     points = bar_points(z=12.0)
-    assert PARAMS.support_style == "tree"
 
-    tree_build = build_supports(model, points, PARAMS)
-    pillar_build = build_supports(model, points, PARAMS.with_(support_style="pillar"))
-    assert len(tree_build.mesh.faces) != len(pillar_build.mesh.faces)
+    sizes = {
+        style: len(build_supports(model, points, PARAMS.with_(support_style=style)).mesh.faces)
+        for style in ("resin", "tree", "pillar")
+    }
+    assert len(set(sizes.values())) == 3, f"styles should differ: {sizes}"
+    assert presets.from_nozzle(0.2).support_style == "resin"
 
 
 def test_geometry_stays_on_the_right_side_of_the_plate():

@@ -60,16 +60,25 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   be on the default path.
 - Geometry stages stay separate: `points` → `geometry` (with `orient` optional in front).
   The UI edits the point list between stages, so stage 3 must be cheap to re-run alone.
-- **Trees are the default support style** (`tree.py`); the pillar generator in
-  `supports.py` stays selectable via `support_style="pillar"` and keeps its own tests.
-  `supports.build_supports` dispatches. `tree.py` reuses the ring/profile machinery from
-  `supports.py`, so that import is deliberately *inside* the function — a top-level one
-  would be circular.
-- **Two tree guarantees, both structural rather than checked after the fact.** A branch
-  never enters the model, and a branch only ever rests on the model when the plate is
-  genuinely unreachable. Both come from the bottom-up reachability sweep in
-  `AvoidanceField`; do not replace it with a local "is there something below me" test,
-  which cannot answer either question. `tests/test_tree.py` pins both.
+- **The resin scaffold is the default support style** (`resin.py`). It is an SLA support
+  system — contact tip, angled arm, thin vertical shaft, join cone, base, cross-links —
+  with FDM dimensions. It is deliberately **not** an FDM organic tree: nothing fuses into
+  a thickening trunk. If a change starts making shafts merge and grow, it is drifting back
+  into `tree.py`'s territory and is wrong for this style.
+  `tree.py` (organic branches) and `supports.py` (plain pillars) stay selectable via
+  `support_style`, and `supports.build_supports` dispatches. Both reuse the ring/profile
+  machinery in `supports.py`, so those imports are deliberately *inside* the functions —
+  a top-level one would be circular.
+- Resin cross-links are horizontal; ours cannot be, because no FDM printer bridges a
+  horizontal strut hanging in air. `resin._link_angle` lays them at the shallowest angle
+  inside the printable band. Adapting resin conventions to what a nozzle can do is the
+  point of the project, so make the adaptation and say why — do not copy the resin value
+  and hope.
+- **Two guarantees, both structural rather than checked after the fact.** A support never
+  enters the model, and only ever rests on the model when the plate is genuinely
+  unreachable. Both come from the bottom-up reachability sweep in `tree.AvoidanceField`,
+  which every style shares; do not replace it with a local "is there something below me"
+  test, which cannot answer either question. `tests/test_tree.py` pins both.
 - A flat downward face is a 90° overhang wherever it is, including buried inside another
   support. That is why merge junctions and tip undersides are built with `cap_bottom=False`
   rather than stacking capped primitives.
