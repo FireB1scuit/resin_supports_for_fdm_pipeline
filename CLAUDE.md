@@ -44,9 +44,16 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   Never introduce a build step, a bundler, or a `package.json`.
 - **All support dimensions derive from `nozzle_diameter`** in `presets.py`. Never hardcode
   a millimetre value in geometry code.
-- **The self-printability invariant is non-negotiable**: generated support geometry must
-  never contain an overhang steeper than the printable limit. If our supports would need
-  supports, the generator is broken. `tests/test_supports.py` enforces this.
+- **The self-printability invariant**: generated support geometry must not contain an
+  overhang steeper than the printable limit. If our supports would need supports, the
+  generator is broken. `tests/test_supports.py` enforces it exactly on constructed
+  scenes.
+  On a real sculpt there is a **measured residual**, guarded by `VIOLATION_BUDGET` in
+  `tests/test_pipeline.py`: a few flat pad undersides where a pillar lands on a feature
+  narrower than itself. They are short bridges off anchored material, not floating
+  islands, and `build_supports` reports them in `SupportBuild.warnings`. The budget is a
+  measurement, not a target — if it rises something regressed, and if it falls, tighten
+  it. Do not raise it to make a test pass.
 - **Models arrive pre-posed.** The input STL is assumed to already be rotated the way it
   should print; the pipeline only sets it down on the bed. Auto-orientation exists in
   `orient.py` but is **opt-in** (`--auto-orient`, or the button in the UI) and must never
