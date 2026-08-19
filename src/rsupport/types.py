@@ -17,6 +17,7 @@ from typing import Literal
 import numpy as np
 
 TipStyle = Literal["conical", "spherical"]
+SupportStyle = Literal["tree", "pillar"]
 
 
 @dataclass(frozen=True)
@@ -39,10 +40,32 @@ class SupportParams:
     tip_penetration: float = 0.1
     tip_style: TipStyle = "conical"
 
+    # --- structure ---
+    support_style: SupportStyle = "tree"
+
     # --- pillar ---
     pillar_diameter: float = 1.2
     pillar_sections: int = 12
     max_pillar_tilt_deg: float = 30.0
+
+    # --- tree ---
+    # How far a branch may lean off vertical. This is the whole printability
+    # budget for a tree: a branch leaning by `a` overhangs by exactly `a`, so
+    # it must stay under printable_overhang_deg. It also sets how far a branch
+    # can travel sideways per layer, and therefore how well it routes around
+    # the model.
+    branch_angle_deg: float = 40.0
+    # 0 = branches merge only when they would otherwise collide.
+    # 1 = branches reach far for partners and collapse into a few thick trunks.
+    merge_strength: float = 0.5
+    max_branch_diameter: float = 3.0
+    # How fast a branch thickens with distance below its tip.
+    diameter_angle_deg: float = 5.0
+    # Gap kept between a branch and the model surface.
+    xy_clearance: float = 0.4
+    # Vertical sampling step for collision and reachability. Finer follows the
+    # model more closely and costs more; this is Cura's "collision resolution".
+    tree_layer_pitch: float = 0.6
 
     # --- bracing ---
     brace_enabled: bool = True

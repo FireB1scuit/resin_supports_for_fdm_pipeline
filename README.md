@@ -1,8 +1,8 @@
 # resin_supports_for_fdm_pipeline
 
 Drop in any STL. Get it back fitted with **resin-style supports that an FDM
-printer can actually make** — thin pillars, tiny snap-off contact tips, diagonal
-cross-braces — ready to slice.
+printer can actually make** — a tree of thin branches that merge on the way down,
+ending in tiny snap-off contact tips — ready to slice.
 
 ## Why
 
@@ -31,7 +31,7 @@ to the surface. So the geometry stays resin-like and the numbers change:
 | Pillar | 1.2–2.0 mm — survives the print, still snaps off |
 | Contact tip | 0.3–0.6 mm — as small as the printer can reliably manage |
 | Tip cone | narrows *upward*, so every layer is smaller than the one below and the support needs no support of its own |
-| Cross-braces | diagonal, ≥45°, so slender pillars hold each other up instead of needing fatter contacts |
+| Branches | merge on the way down into limbs and trunks, so the structure carries load through its junctions instead of balancing a stick on each foot |
 | Support layer height | 2× the model's — supports carry no detail, so print them coarse |
 
 Every one of those is derived from your nozzle diameter, not hardcoded.
@@ -101,6 +101,9 @@ Either edit rebuilds only the geometry, so it comes back in well under a second.
 | Control | What it does | Reach for it when |
 |---|---|---|
 | **preset** | swaps the whole parameter set for a nozzle | you change nozzles |
+| **style** | tree (branches that merge and route around the model) or pillars (one straight column per contact) | trees are the default; pillars are the simpler, older behaviour |
+| **branch lean** | how far a branch may tilt off vertical | branches cannot get around an obstacle (raise), or thin branches are failing (lower) |
+| **merging** | how eagerly branches seek each other out | fewer, thicker trunks and less to clean up (raise); easier removal, more independent branches (lower) |
 | **tip ø** | how wide the support is where it touches | supports snap off during the print (raise) or leave visible scars (lower) |
 | **pillar ø** | thickness of the column | pillars snap or wobble (raise) |
 | **spacing** | how far apart contact points sit | too many supports to clean up (raise), or an overhang sags (lower) |
@@ -188,6 +191,9 @@ Useful flags for `supports`:
 | `--nozzle MM` | re-derives every dimension from scratch |
 | `--tip`, `--pillar`, `--spacing`, `--overhang` | override one value |
 | `--tip-style {conical,spherical}` | |
+| `--style {tree,pillar}` | structure; tree is the default |
+| `--branch-angle DEG` | how far a branch may lean (tree only) |
+| `--merge 0..1` | how hard branches merge (tree only) |
 | `--no-braces` | drop the cross-braces |
 | `--auto-orient` | re-pose first (off by default) |
 
@@ -211,6 +217,8 @@ Useful flags for `supports`:
 | Ugly scars after removal | lower **tip ø** toward 0.3 mm; set support interface layers to 1 |
 | Supports won't come off | lower **pillar ø**, switch tip style to spherical, or turn braces off |
 | Far too many supports | raise **spacing**, or lower **overhang** so fewer faces qualify; try `mini_0.2_sparse` |
+| Too many separate feet to snap off | raise **merging** — branches will collapse into fewer trunks |
+| A branch is fused to the model instead of the plate | it had no way down; that is reported in the log. Raise **branch lean** so it can reach further sideways |
 | An overhang sagged | lower **spacing**, raise **overhang**; or shift-click extra supports exactly where it drooped |
 | A thin part printed in mid-air | that region had no support — shift-click to add one; report it, islands are meant to be caught automatically |
 | Log says *"N pillar(s) leaned to clear the model"* | normal — those pillars tilted to avoid passing through the sculpt |
@@ -220,9 +228,12 @@ Useful flags for `supports`:
 
 - **Never yet tested against a real miniature.** All development used a
   synthetic model. Support density is the first thing likely to need tuning.
-- A handful of support pad undersides overhang where a pillar lands on a feature
+- A handful of support pad undersides overhang where a *pillar* lands on a feature
   narrower than itself — short bridges off anchored material, not floating
-  islands. Reported in the log and budgeted in `tests/test_pipeline.py`.
+  islands. Reported in the log and budgeted in `tests/test_pipeline.py`. Trees do
+  not have this problem.
+- Trees produce roughly twice the triangle count of pillars for the same model,
+  and take about three times as long to build (still well under two seconds).
 - Auto-orientation rarely picks a tilted pose for a model with a flat base.
 - Detail detection cannot tell a sculpted face from a machined edge, so the
   "keep supports off the detail" scoring suits organic models, not brackets.
@@ -233,6 +244,6 @@ See [CLAUDE.md](CLAUDE.md) for the module map, the git rules and the invariants.
 The full design is in [docs/PLAN.md](docs/PLAN.md).
 
 ```bash
-python -m pytest                              # 119 tests
+python -m pytest                              # 137 tests
 python scripts/make_sample.py samples/synthetic_mini.stl
 ```

@@ -188,7 +188,17 @@ function overrides() {
     overhang_angle_deg: +$('overhang').value,
     tip_style: $('tipstyle').value,
     brace_enabled: $('braces').checked,
+    support_style: $('style').value,
+    branch_angle_deg: +$('branch').value,
+    merge_strength: +$('merge').value,
   };
+}
+
+/** Branch controls mean nothing to the pillar generator, and vice versa. */
+function syncStyleVisibility() {
+  const tree = $('style').value === 'tree';
+  document.querySelectorAll('.tree-only').forEach(el => el.style.display = tree ? '' : 'none');
+  document.querySelectorAll('.pillar-only').forEach(el => el.style.display = tree ? 'none' : '');
 }
 
 function syncSliders(p) {
@@ -199,6 +209,10 @@ function syncSliders(p) {
   }
   $('tipstyle').value = p.tip_style;
   $('braces').checked = p.brace_enabled;
+  if (p.support_style) $('style').value = p.support_style;
+  if (p.branch_angle_deg != null) $('branch').value = p.branch_angle_deg;
+  if (p.merge_strength != null) $('merge').value = p.merge_strength;
+  syncStyleVisibility();
   showSliderValues();
 }
 
@@ -207,8 +221,11 @@ function showSliderValues() {
   $('pillar_v').textContent = (+$('pillar').value).toFixed(1) + ' mm';
   $('spacing_v').textContent = (+$('spacing').value).toFixed(2) + ' mm';
   $('overhang_v').textContent = $('overhang').value + '°';
+  $('branch_v').textContent = $('branch').value + '°';
+  $('merge_v').textContent = (+$('merge').value).toFixed(2);
 }
-['tip', 'pillar', 'spacing', 'overhang'].forEach(id => $(id).addEventListener('input', showSliderValues));
+['tip', 'pillar', 'spacing', 'overhang', 'branch', 'merge']
+  .forEach(id => $(id).addEventListener('input', showSliderValues));
 
 // ---------------------------------------------------------------- pipeline
 
@@ -297,8 +314,9 @@ async function runSupports() {
   });
   rebuildMarkers();
 
+  const joins = ($('style').value === 'tree') ? 'merges' : 'braces';
   $('stats').innerHTML =
-    `<b>${r.points}</b> supports &middot; <b>${r.braces}</b> braces<br>` +
+    `<b>${r.points}</b> supports &middot; <b>${r.braces}</b> ${joins}<br>` +
     `<b>${r.faces.toLocaleString()}</b> triangles` +
     (r.dropped ? `<br><span style="color:var(--warn)"><b>${r.dropped}</b> dropped (no clear path)</span>` : '');
   (r.warnings || []).slice(0, 5).forEach(w => log(w, 'w'));
@@ -395,6 +413,8 @@ document.querySelectorAll('[data-toggle]').forEach(btn => {
 ['spacing', 'overhang'].forEach(id => $(id).addEventListener('change', () => rerun('points')));
 $('tipstyle').addEventListener('change', () => rerun('geometry'));
 $('braces').addEventListener('change', () => rerun('geometry'));
+['branch', 'merge'].forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
+$('style').addEventListener('change', () => { syncStyleVisibility(); rerun('geometry'); });
 $('preset').addEventListener('change', async () => {
   if (!state.sid || state.busy) return;
   busy(true);

@@ -1093,6 +1093,13 @@ def build_supports(
     if ray is None:
         ray = DownRay(mesh)
 
+    if params.support_style == "tree":
+        # Imported here rather than at module scope: tree.py reuses the ring
+        # and profile machinery below, so a top-level import would be circular.
+        from .tree import build_tree
+
+        return build_tree(mesh, points, params, ray=ray)
+
     columns, dropped, warnings = _route_columns(ray, points, params)
     parts = [_column_mesh(c, params) for c in columns]
 

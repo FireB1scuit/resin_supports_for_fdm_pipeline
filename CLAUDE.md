@@ -60,6 +60,19 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   be on the default path.
 - Geometry stages stay separate: `points` → `geometry` (with `orient` optional in front).
   The UI edits the point list between stages, so stage 3 must be cheap to re-run alone.
+- **Trees are the default support style** (`tree.py`); the pillar generator in
+  `supports.py` stays selectable via `support_style="pillar"` and keeps its own tests.
+  `supports.build_supports` dispatches. `tree.py` reuses the ring/profile machinery from
+  `supports.py`, so that import is deliberately *inside* the function — a top-level one
+  would be circular.
+- **Two tree guarantees, both structural rather than checked after the fact.** A branch
+  never enters the model, and a branch only ever rests on the model when the plate is
+  genuinely unreachable. Both come from the bottom-up reachability sweep in
+  `AvoidanceField`; do not replace it with a local "is there something below me" test,
+  which cannot answer either question. `tests/test_tree.py` pins both.
+- A flat downward face is a 90° overhang wherever it is, including buried inside another
+  support. That is why merge junctions and tip undersides are built with `cap_bottom=False`
+  rather than stacking capped primitives.
 - Run `pytest` before pushing.
 
 ## Layout

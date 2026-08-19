@@ -68,6 +68,16 @@ def from_nozzle(
         # A tip cannot bridge, so points must sit closer together than the
         # printer's reliable bridging distance.
         max_unsupported_span=round(max(4.0, pillar * 4.0), 3),
+        # --- tree ---
+        # Clearance has to clear the printer's own imprecision, so it scales
+        # with the nozzle rather than being a fixed gap.
+        xy_clearance=round(max(0.3, n * 2.0), 3),
+        # Sampling finer than a couple of support layers buys nothing: the
+        # slicer cannot follow the model that closely anyway.
+        tree_layer_pitch=round(max(0.4, layer_height * 6.0), 3),
+        # A trunk carrying a dozen branches needs real section, but past this
+        # it stops being removable by hand.
+        max_branch_diameter=round(pillar * 2.5, 3),
     )
     return params.with_(**overrides)
 
