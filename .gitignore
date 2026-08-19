@@ -19,6 +19,3 @@ uploads/
 # large sample meshes — keep only tiny synthetic ones
 samples/*.stl
 !samples/synthetic_*.stl
-
-# vendored, fetched by scripts/fetch_three.py
-src/rsupport/web/static/three.module.js

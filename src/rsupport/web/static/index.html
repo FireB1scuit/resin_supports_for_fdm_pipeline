@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>resin supports for FDM</title>
+<style>
+  :root {
+    --bg: #14161a;
+    --panel: #1c1f25;
+    --panel-2: #23272f;
+    --line: #2f343d;
+    --text: #e6e8ec;
+    --dim: #949aa6;
+    --accent: #ff8a3d;
+    --accent-2: #4fb0ff;
+    --ok: #59d18e;
+    --warn: #ffcc55;
+    --err: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 13px/1.45 ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+    display: grid; grid-template-columns: 1fr 296px; overflow: hidden;
+  }
+
+  #stage { position: relative; }
+  #canvas { display: block; width: 100%; height: 100%; }
+
+  #drop {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    background: rgba(20,22,26,.92); text-align: center; z-index: 5;
+    transition: background .15s;
+  }
+  #drop.hide { display: none; }
+  #drop.over { background: rgba(255,138,61,.12); }
+  #drop .inner {
+    border: 1.5px dashed var(--line); border-radius: 14px;
+    padding: 42px 56px; pointer-events: none;
+  }
+  #drop h1 { margin: 0 0 6px; font-size: 19px; font-weight: 600; letter-spacing: -.01em; }
+  #drop p { margin: 0; color: var(--dim); }
+  #drop b { color: var(--accent); }
+
+  #hud {
+    position: absolute; left: 12px; top: 12px; z-index: 4;
+    display: flex; gap: 6px; flex-wrap: wrap;
+  }
+  #legend {
+    position: absolute; left: 12px; bottom: 12px; z-index: 4;
+    color: var(--dim); font-size: 11px; line-height: 1.7;
+    background: rgba(20,22,26,.72); padding: 8px 10px; border-radius: 8px;
+    border: 1px solid var(--line);
+  }
+  #legend .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; }
+
+  aside {
+    background: var(--panel); border-left: 1px solid var(--line);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  aside header {
+    padding: 13px 14px; border-bottom: 1px solid var(--line);
+  }
+  aside header .title { font-weight: 600; letter-spacing: -.01em; }
+  aside header .sub { color: var(--dim); font-size: 11px; margin-top: 2px; }
+  .scroll { overflow-y: auto; padding: 4px 14px 14px; flex: 1; }
+
+  section { margin-top: 14px; }
+  section > h2 {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: .09em;
+    color: var(--dim); margin: 0 0 8px; font-weight: 600;
+  }
+
+  .row { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
+  .row label { flex: 1; color: var(--dim); }
+  .row output { font-variant-numeric: tabular-nums; min-width: 40px; text-align: right; }
+  input[type=range] { width: 108px; accent-color: var(--accent); }
+  select, button {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 7px;
+    padding: 6px 9px; font: inherit; cursor: pointer;
+  }
+  select { width: 100%; }
+  button:hover:not(:disabled) { border-color: var(--dim); }
+  button:disabled { opacity: .4; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #1a1206; font-weight: 600; }
+  button.primary:hover:not(:disabled) { filter: brightness(1.08); }
+  .btns { display: flex; gap: 6px; flex-wrap: wrap; }
+  .btns button { flex: 1; }
+
+  .chip {
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 7px; padding: 5px 9px; font-size: 11.5px; cursor: pointer;
+    color: var(--dim);
+  }
+  .chip.on { color: var(--text); border-color: var(--accent); }
+
+  .orients { display: flex; flex-direction: column; gap: 5px; }
+  .orient {
+    text-align: left; padding: 7px 9px; line-height: 1.3;
+    display: flex; justify-content: space-between; gap: 8px;
+  }
+  .orient.on { border-color: var(--accent); }
+  .orient small { color: var(--dim); font-variant-numeric: tabular-nums; }
+
+  #stats { color: var(--dim); font-size: 11.5px; line-height: 1.7; }
+  #stats b { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 500; }
+
+  #log {
+    border-top: 1px solid var(--line); padding: 9px 14px;
+    font-size: 11px; color: var(--dim); max-height: 132px; overflow-y: auto;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  #log div { white-space: pre-wrap; }
+  #log .e { color: var(--err); }
+  #log .w { color: var(--warn); }
+  #log .g { color: var(--ok); }
+
+  .busy { position: absolute; inset: 0; z-index: 6; display: none; place-items: center;
+          background: rgba(20,22,26,.55); }
+  .busy.on { display: grid; }
+  .spinner {
+    width: 26px; height: 26px; border-radius: 50%;
+    border: 2.5px solid var(--line); border-top-color: var(--accent);
+    animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <canvas id="canvas"></canvas>
+
+  <div id="hud">
+    <button class="chip on" data-toggle="model">model</button>
+    <button class="chip on" data-toggle="supports">supports</button>
+    <button class="chip" data-toggle="points">contact points</button>
+    <button class="chip" data-toggle="wire">wireframe</button>
+  </div>
+
+  <div id="legend">
+    <div><span class="sw" style="background:#9aa3af"></span>model</div>
+    <div><span class="sw" style="background:#ff8a3d"></span>supports</div>
+    <div><span class="sw" style="background:#ff5a5a"></span>contact point &mdash; click to delete</div>
+    <div style="margin-top:4px">shift-click the model to add one</div>
+  </div>
+
+  <div class="busy" id="busy"><div class="spinner"></div></div>
+
+  <div id="drop">
+    <div class="inner">
+      <h1>Drop an STL here</h1>
+      <p>it gets oriented and given <b>resin-style supports</b> sized for FDM</p>
+    </div>
+  </div>
+</div>
+
+<aside>
+  <header>
+    <div class="title">resin supports for FDM</div>
+    <div class="sub" id="filename">no model loaded</div>
+  </header>
+
+  <div class="scroll">
+    <section>
+      <h2>printer</h2>
+      <div class="row">
+        <label for="preset">preset</label>
+      </div>
+      <select id="preset"></select>
+    </section>
+
+    <section>
+      <h2>supports</h2>
+      <div class="row">
+        <label for="tip">tip &oslash;</label>
+        <input type="range" id="tip" min=".2" max=".8" step=".05">
+        <output id="tip_v"></output>
+      </div>
+      <div class="row">
+        <label for="pillar">pillar &oslash;</label>
+        <input type="range" id="pillar" min=".8" max="2.5" step=".1">
+        <output id="pillar_v"></output>
+      </div>
+      <div class="row">
+        <label for="spacing">spacing</label>
+        <input type="range" id="spacing" min="1.5" max="8" step=".25">
+        <output id="spacing_v"></output>
+      </div>
+      <div class="row">
+        <label for="overhang">overhang</label>
+        <input type="range" id="overhang" min="30" max="70" step="1">
+        <output id="overhang_v"></output>
+      </div>
+      <div class="row">
+        <label for="tipstyle">tip style</label>
+        <select id="tipstyle" style="width:auto">
+          <option value="conical">conical</option>
+          <option value="spherical">spherical</option>
+        </select>
+      </div>
+      <div class="row">
+        <label for="braces">cross-braces</label>
+        <input type="checkbox" id="braces" checked>
+      </div>
+    </section>
+
+    <section>
+      <h2>orientation</h2>
+      <div class="orients" id="orients"><span style="color:var(--dim)">&mdash;</span></div>
+    </section>
+
+    <section>
+      <h2>result</h2>
+      <div id="stats">&mdash;</div>
+    </section>
+
+    <section>
+      <h2>download</h2>
+      <div class="btns">
+        <button id="dl3mf" class="primary" disabled>3MF</button>
+        <button id="dlstl" disabled>STL</button>
+        <button id="dlsep" disabled>both</button>
+      </div>
+      <p style="color:var(--dim); font-size:11px; margin:8px 0 0">
+        3MF carries per-object layer heights &mdash; model fine, supports coarse.
+        Slice the plain STL with supports switched <b>off</b>.
+      </p>
+    </section>
+  </div>
+
+  <div id="log"></div>
+</aside>
+
+<script type="importmap">
+{ "imports": { "three": "./three.module.js" } }
+</script>
+<script type="module" src="./app.js"></script>
+</body>
+</html>
