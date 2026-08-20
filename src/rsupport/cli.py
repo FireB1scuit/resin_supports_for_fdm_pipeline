@@ -31,6 +31,31 @@ def _add_param_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--spacing", type=float, dest="support_spacing", help="support spacing (mm)")
     g.add_argument("--overhang", type=float, dest="overhang_angle_deg", help="overhang angle (deg)")
     g.add_argument("--tip-style", dest="tip_style", choices=["conical", "spherical"])
+    g.add_argument(
+        "--style",
+        dest="support_style",
+        choices=["resin", "tree", "pillar"],
+        help="resin: SLA scaffold of tips, arms, thin shafts and cross-links "
+        "(default). tree: branches that merge into trunks. pillar: one straight "
+        "column per contact",
+    )
+    g.add_argument(
+        "--branch-angle",
+        type=float,
+        dest="branch_angle_deg",
+        help="how far a branch may lean off vertical (deg); tree only",
+    )
+    g.add_argument(
+        "--merge",
+        type=float,
+        dest="merge_strength",
+        help="0 = branches stay separate, 1 = collapse into a few thick trunks; tree only",
+    )
+    g.add_argument(
+        "--parenting",
+        type=float,
+        help="0 = one shaft per contact, 1 = many tips share a shaft; resin only",
+    )
     g.add_argument("--no-braces", action="store_true", help="disable diagonal cross-braces")
 
 
@@ -49,6 +74,10 @@ def _params_from_args(args) -> SupportParams:
             "support_spacing",
             "overhang_angle_deg",
             "tip_style",
+            "support_style",
+            "branch_angle_deg",
+            "merge_strength",
+            "parenting",
         )
     }
     overrides = {k: v for k, v in overrides.items() if v is not None}
@@ -119,8 +148,9 @@ def cmd_supports(args) -> int:
 
     t0 = time.perf_counter()
     build = supports.build_supports(mesh, points, params)
+    joins = {"resin": "links", "tree": "merges"}.get(params.support_style, "braces")
     print(
-        f"built {len(build.mesh.faces):,} support faces, {build.n_braces} braces, "
+        f"built {len(build.mesh.faces):,} support faces, {build.n_braces} {joins}, "
         f"{len(build.dropped)} dropped in {time.perf_counter()-t0:.2f}s"
     )
     for w in build.warnings[:10]:

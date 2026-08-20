@@ -1,0 +1,16 @@
+services:
+  rsupport:
+    build: .
+    image: rsupport:latest
+    container_name: rsupport
+    ports:
+      - "8000:8000"
+    # The app is the container's only process, so it is up for exactly as long
+    # as the container is. `unless-stopped` brings it back after a crash and
+    # after a Docker restart, so it is running again the moment Docker is —
+    # unless you stopped it on purpose.
+    restart: unless-stopped
+    # Sessions live in memory and exports in a tempdir; nothing survives a
+    # restart by design, so give /tmp a ceiling instead of a volume.
+    tmpfs:
+      - /tmp:size=1g

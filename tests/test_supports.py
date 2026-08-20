@@ -31,7 +31,9 @@ from rsupport.supports import (
 )
 from rsupport.types import SupportParams, SupportPoint
 
-PARAMS = presets.from_nozzle(0.2)
+# This file is about the pillar generator specifically, so it pins the style.
+# Trees are the default and have their own file.
+PARAMS = presets.from_nozzle(0.2).with_(support_style="pillar")
 
 
 # --------------------------------------------------------------------------- #
@@ -466,7 +468,7 @@ def test_self_printability_with_tall_braced_pillars():
 
 @pytest.mark.parametrize("nozzle", [0.2, 0.25, 0.4])
 def test_self_printability_across_presets(nozzle):
-    params = presets.from_nozzle(nozzle)
+    params = presets.from_nozzle(nozzle).with_(support_style="pillar")
     model = table(bar_z=14.0)
     build = build_supports(model, ledge_grid(14.0, step=3.0), params)
     assert_printable(build.mesh, params, model)
