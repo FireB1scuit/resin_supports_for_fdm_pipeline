@@ -60,6 +60,35 @@ session away.
 
 `--port 9000` to move it, `--no-browser` if you'd rather open the tab yourself.
 
+## Or run it in Docker
+
+If you'd rather not install Python and the geometry stack at all:
+
+```bash
+docker compose up -d
+```
+
+Then open `http://localhost:8000`. The app *is* the container's only process, so
+it is running for exactly as long as the container is — starting the container
+starts the app, and there is nothing else to launch.
+
+`restart: unless-stopped` in `compose.yaml` means it also comes back on its own
+after a crash and after a Docker or machine restart, so it is up again as soon
+as Docker is. It stays down only if you stopped it deliberately:
+
+```bash
+docker compose stop
+```
+
+Same privacy story as running it locally: sessions are in memory, exports go to
+a tempdir, and `tmpfs` wipes both when the container stops. Nothing is written
+to a volume, so nothing survives a restart — by design.
+
+To publish it somewhere other than port 8000, change the left-hand number in
+`compose.yaml`'s `ports:`. Note the container binds `0.0.0.0` internally, which
+is how the published port reaches it — if you map it to an interface other than
+localhost, anyone who can reach that address can use the app.
+
 ## The workflow
 
 1. **Pose your model first.** Rotate it in whatever tool you like so it stands

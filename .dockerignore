@@ -1,0 +1,30 @@
+.git/
+.github/
+.claude/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# working output — never belongs in an image
+out/
+uploads/
+*.out.stl
+*.out.3mf
+
+# tests and docs are not part of the runtime
+tests/
+docs/
+samples/
+scripts/
+CLAUDE.md
+Dockerfile
+compose.yaml
+.dockerignore

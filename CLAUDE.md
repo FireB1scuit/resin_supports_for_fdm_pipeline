@@ -108,4 +108,11 @@ src/rsupport/
 python -m pytest
 python -m rsupport.cli supports samples/mini.stl -o out.stl
 python -m rsupport.web
+docker compose up -d   # same app, containerised, on :8000
 ```
+
+`Dockerfile` pins **3.12**, not 3.14, for the same wheel reason as above — every
+dependency has a cp312 manylinux wheel, so the image needs no compiler. The
+container runs `python -m rsupport.web` as its only process, so keep that
+entrypoint working; `compose.yaml`'s `restart: unless-stopped` is what makes the
+app come back with Docker.
