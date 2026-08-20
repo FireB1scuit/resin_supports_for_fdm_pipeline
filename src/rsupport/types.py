@@ -17,7 +17,6 @@ from typing import Literal
 import numpy as np
 
 TipStyle = Literal["conical", "spherical"]
-SupportStyle = Literal["resin", "tree", "pillar"]
 
 
 @dataclass(frozen=True)
@@ -40,13 +39,10 @@ class SupportParams:
     tip_penetration: float = 0.1
     tip_style: TipStyle = "conical"
 
-    # --- structure ---
-    support_style: SupportStyle = "resin"
-
-    # --- resin scaffold ---
-    # An SLA support is base -> join cone -> vertical shaft -> angled arm ->
-    # tip. The shaft stays thin the whole way, tapering slightly upward; it
-    # does not thicken into a trunk.
+    # --- scaffold ---
+    # A support is base -> join cone -> vertical shaft -> angled arm -> tip.
+    # The shaft stays thin the whole way, tapering slightly upward; it does not
+    # thicken into a trunk.
     shaft_upper_diameter: float = 0.7
     shaft_lower_diameter: float = 1.2
     arm_diameter: float = 0.6
@@ -57,43 +53,32 @@ class SupportParams:
     parenting: float = 0.5
     # Vertical spacing of the cross-links that tie shafts into a scaffold.
     brace_interval: float = 8.0
+    # Polygon sides per lofted ring.
+    ring_sections: int = 12
 
-    # --- pillar ---
-    pillar_diameter: float = 1.2
-    pillar_sections: int = 12
-    max_pillar_tilt_deg: float = 30.0
-
-    # --- tree ---
-    # How far a branch may lean off vertical. This is the whole printability
-    # budget for a tree: a branch leaning by `a` overhangs by exactly `a`, so
-    # it must stay under printable_overhang_deg. It also sets how far a branch
-    # can travel sideways per layer, and therefore how well it routes around
-    # the model.
-    branch_angle_deg: float = 40.0
-    # 0 = branches merge only when they would otherwise collide.
-    # 1 = branches reach far for partners and collapse into a few thick trunks.
-    merge_strength: float = 0.5
-    max_branch_diameter: float = 3.0
-    # How fast a branch thickens with distance below its tip.
-    diameter_angle_deg: float = 5.0
-    # Gap kept between a branch and the model surface.
+    # --- routing and collision ---
+    # How far any strut may lean off vertical. This is the whole printability
+    # budget for anything that does not run straight up: a strut leaning by `a`
+    # overhangs by exactly `a`, so it must stay under printable_overhang_deg.
+    # It also sets how far a shaft can travel sideways per layer, and therefore
+    # how well the scaffold routes around the model.
+    strut_lean_deg: float = 40.0
+    # Fattest strut the avoidance field samples a collision radius for.
+    max_strut_diameter: float = 3.0
+    # Gap kept between a strut and the model surface.
     xy_clearance: float = 0.4
     # Vertical sampling step for collision and reachability. Finer follows the
     # model more closely and costs more; this is Cura's "collision resolution".
-    tree_layer_pitch: float = 0.6
+    collision_pitch: float = 0.6
 
-    # --- bracing ---
+    # --- cross-links ---
     brace_enabled: bool = True
     brace_diameter: float = 0.8
-    brace_slenderness: float = 15.0
-    brace_min_angle_deg: float = 45.0
     brace_max_span: float = 12.0
 
-    # --- foot ---
+    # --- base ---
     foot_diameter: float = 5.0
     foot_height: float = 0.6
-    pad_diameter: float = 2.0
-    pad_height: float = 0.4
 
     # --- placement ---
     overhang_angle_deg: float = 45.0

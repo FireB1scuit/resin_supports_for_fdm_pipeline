@@ -1,8 +1,8 @@
 # resin_supports_for_fdm_pipeline
 
 Drop in any STL. Get it back fitted with **resin-style supports that an FDM
-printer can actually make** — a tree of thin branches that merge on the way down,
-ending in tiny snap-off contact tips — ready to slice.
+printer can actually make** — a scaffold of thin vertical shafts, cross-linked
+into a lattice, ending in tiny snap-off contact tips — ready to slice.
 
 ## Why
 
@@ -28,10 +28,11 @@ to the surface. So the geometry stays resin-like and the numbers change:
 
 | | |
 |---|---|
-| Pillar | 1.2–2.0 mm — survives the print, still snaps off |
+| Shaft | 1.2–2.0 mm — survives the print, still snaps off |
 | Contact tip | 0.3–0.6 mm — as small as the printer can reliably manage |
 | Tip cone | narrows *upward*, so every layer is smaller than the one below and the support needs no support of its own |
-| Branches | merge on the way down into limbs and trunks, so the structure carries load through its junctions instead of balancing a stick on each foot |
+| Arms | several tips fan off one shaft, so there are far fewer feet to snap off than there are contact points |
+| Cross-links | diagonal struts tying the shafts into a lattice, so the structure braces itself instead of balancing a stick on each foot |
 | Support layer height | 2× the model's — supports carry no detail, so print them coarse |
 
 Every one of those is derived from your nozzle diameter, not hardcoded.
@@ -134,17 +135,16 @@ Either edit rebuilds only the geometry, so it comes back in well under a second.
 | Control | What it does | Reach for it when |
 |---|---|---|
 | **preset** | swaps the whole parameter set for a nozzle | you change nozzles |
-| **style** | tree (branches that merge and route around the model) or pillars (one straight column per contact) | trees are the default; pillars are the simpler, older behaviour |
-| **branch lean** | how far a branch may tilt off vertical | branches cannot get around an obstacle (raise), or thin branches are failing (lower) |
-| **merging** | how eagerly branches seek each other out | fewer, thicker trunks and less to clean up (raise); easier removal, more independent branches (lower) |
+| **parenting** | how many tips share one shaft | fewer feet to snap off (raise); shorter, more direct arms (lower) |
+| **strut lean** | how far anything may tilt off vertical | a shaft cannot get around an obstacle (raise), or leaning struts are failing to print (lower) |
 | **tip ø** | how wide the support is where it touches | supports snap off during the print (raise) or leave visible scars (lower) |
-| **pillar ø** | thickness of the column | pillars snap or wobble (raise) |
+| **shaft ø** | thickness of the vertical strut | shafts snap or wobble (raise) |
 | **spacing** | how far apart contact points sit | too many supports to clean up (raise), or an overhang sags (lower) |
 | **overhang** | the angle at which a face is judged to need support | steep walls are being supported unnecessarily (lower) or a shallow slope droops (raise) |
 | **tip style** | conical or spherical contact | spherical snaps off cleaner but grips less |
-| **cross-braces** | diagonal struts between slender pillars | turn off only if removal is a nightmare — they exist so tips can stay thin |
+| **cross-links** | diagonal struts between slender shafts | turn off only if removal is a nightmare — they exist so tips can stay thin |
 
-Changing **tip ø**, **pillar ø**, **tip style** or **braces** rebuilds geometry
+Changing **tip ø**, **shaft ø**, **tip style** or **cross-links** rebuilds geometry
 only, which is fast. Changing **spacing** or **overhang** re-decides where
 supports go, which takes a moment longer. Sliders act on release, not on drag.
 
@@ -194,7 +194,7 @@ Beyond what the 3MF sets for you:
 | Support interface layers | 1 (not the default 2–3) — better surface |
 
 A trick worth knowing if you have a multi-material setup: print the tips in a
-different filament from the pillars (PETG tips under PLA supports) and they
+different filament from the shafts (PETG tips under PLA supports) and they
 release almost by themselves.
 
 ## The command line
@@ -222,19 +222,18 @@ Useful flags for `supports`:
 | `--mode {auto,combined,separate,3mf}` | override what the extension implies |
 | `--preset NAME` | see the table below |
 | `--nozzle MM` | re-derives every dimension from scratch |
-| `--tip`, `--pillar`, `--spacing`, `--overhang` | override one value |
+| `--tip`, `--shaft`, `--spacing`, `--overhang` | override one value |
 | `--tip-style {conical,spherical}` | |
-| `--style {tree,pillar}` | structure; tree is the default |
-| `--branch-angle DEG` | how far a branch may lean (tree only) |
-| `--merge 0..1` | how hard branches merge (tree only) |
-| `--no-braces` | drop the cross-braces |
+| `--lean DEG` | how far a strut may lean off vertical |
+| `--parenting 0..1` | how many tips share a shaft |
+| `--no-braces` | drop the cross-links |
 | `--auto-orient` | re-pose first (off by default) |
 
 `python -m rsupport.cli serve` starts the same web app.
 
 ## Presets
 
-| Name | Nozzle | Model layer | Tip ø | Pillar ø | Spacing | Overhang |
+| Name | Nozzle | Model layer | Tip ø | Shaft ø | Spacing | Overhang |
 |---|---|---|---|---|---|---|
 | `mini_0.2` *(default)* | 0.2 | 0.08 | 0.30 | 1.2 | 3.0 | 45° |
 | `mini_0.25` | 0.25 | 0.10 | 0.375 | 1.5 | 3.0 | 45° |
@@ -246,27 +245,27 @@ Useful flags for `supports`:
 
 | Symptom | Try |
 |---|---|
-| Supports snap off mid-print | raise **pillar ø** toward 1.5 mm; keep braces on; slow the outer wall to 35–40 mm/s |
+| Supports snap off mid-print | raise **shaft ø** toward 1.5 mm; keep cross-links on; slow the outer wall to 35–40 mm/s |
 | Ugly scars after removal | lower **tip ø** toward 0.3 mm; set support interface layers to 1 |
-| Supports won't come off | lower **pillar ø**, switch tip style to spherical, or turn braces off |
+| Supports won't come off | lower **shaft ø**, switch tip style to spherical, or turn cross-links off |
 | Far too many supports | raise **spacing**, or lower **overhang** so fewer faces qualify; try `mini_0.2_sparse` |
-| Too many separate feet to snap off | raise **merging** — branches will collapse into fewer trunks |
-| A branch is fused to the model instead of the plate | it had no way down; that is reported in the log. Raise **branch lean** so it can reach further sideways |
+| Too many separate feet to snap off | raise **parenting** — more tips will share a shaft |
 | An overhang sagged | lower **spacing**, raise **overhang**; or shift-click extra supports exactly where it drooped |
 | A thin part printed in mid-air | that region had no support — shift-click to add one; report it, islands are meant to be caught automatically |
-| Log says *"N pillar(s) leaned to clear the model"* | normal — those pillars tilted to avoid passing through the sculpt |
-| Log says *"land on a feature too small to rest a pad on"* | also normal, and cosmetic: the base of those few supports bridges a short gap |
+| Log says *"N shaft(s) stand on the model"* | there was no way down to the plate from there. Those shafts end in a tip, so they still snap off; raise **strut lean** to let one reach further sideways |
+| Log says *"N contact point(s) had nowhere to stand a shaft"* | that overhang is unheld — shift-click a support somewhere with a clear run down, or raise **strut lean** |
 
 ## Known limits
 
 - **Never yet tested against a real miniature.** All development used a
   synthetic model. Support density is the first thing likely to need tuning.
-- A handful of support pad undersides overhang where a *pillar* lands on a feature
+- A handful of support undersides overhang where a support lands on a feature
   narrower than itself — short bridges off anchored material, not floating
-  islands. Reported in the log and budgeted in `tests/test_pipeline.py`. Trees do
-  not have this problem.
-- Trees produce roughly twice the triangle count of pillars for the same model,
-  and take about three times as long to build (still well under two seconds).
+  islands. Reported in the log and budgeted in `tests/test_pipeline.py`.
+- Shafts descend straight down. That is what an SLA shaft does, and it keeps the
+  scaffold readable and easy to cut off, but it means a contact with model
+  directly beneath it all the way to the plate rests on the model rather than
+  walking out sideways to reach the bed.
 - Auto-orientation rarely picks a tilted pose for a model with a flat base.
 - Detail detection cannot tell a sculpted face from a machined edge, so the
   "keep supports off the detail" scoring suits organic models, not brackets.
@@ -277,6 +276,6 @@ See [CLAUDE.md](CLAUDE.md) for the module map, the git rules and the invariants.
 The full design is in [docs/PLAN.md](docs/PLAN.md).
 
 ```bash
-python -m pytest                              # 137 tests
+python -m pytest                              # 129 tests
 python scripts/make_sample.py samples/synthetic_mini.stl
 ```

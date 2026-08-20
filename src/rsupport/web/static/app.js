@@ -183,53 +183,38 @@ function applyVisibility() {
 function overrides() {
   return {
     tip_diameter: +$('tip').value,
-    pillar_diameter: +$('pillar').value,
+    shaft_lower_diameter: +$('shaft').value,
     support_spacing: +$('spacing').value,
     overhang_angle_deg: +$('overhang').value,
     tip_style: $('tipstyle').value,
     brace_enabled: $('braces').checked,
-    support_style: $('style').value,
-    branch_angle_deg: +$('branch').value,
-    merge_strength: +$('merge').value,
+    strut_lean_deg: +$('lean').value,
     parenting: +$('parenting').value,
   };
 }
 
-/** Branch controls mean nothing to the pillar generator, and vice versa. */
-function syncStyleVisibility() {
-  const style = $('style').value;
-  for (const kind of ['resin', 'tree', 'pillar']) {
-    document.querySelectorAll('.' + kind + '-only')
-      .forEach(el => el.style.display = (style === kind) ? '' : 'none');
-  }
-}
-
 function syncSliders(p) {
   if (!p) return;
-  for (const [id, key] of [['tip', 'tip_diameter'], ['pillar', 'pillar_diameter'],
+  for (const [id, key] of [['tip', 'tip_diameter'], ['shaft', 'shaft_lower_diameter'],
                            ['spacing', 'support_spacing'], ['overhang', 'overhang_angle_deg']]) {
     $(id).value = p[key];
   }
   $('tipstyle').value = p.tip_style;
   $('braces').checked = p.brace_enabled;
-  if (p.support_style) $('style').value = p.support_style;
-  if (p.branch_angle_deg != null) $('branch').value = p.branch_angle_deg;
-  if (p.merge_strength != null) $('merge').value = p.merge_strength;
+  if (p.strut_lean_deg != null) $('lean').value = p.strut_lean_deg;
   if (p.parenting != null) $('parenting').value = p.parenting;
-  syncStyleVisibility();
   showSliderValues();
 }
 
 function showSliderValues() {
   $('tip_v').textContent = (+$('tip').value).toFixed(2) + ' mm';
-  $('pillar_v').textContent = (+$('pillar').value).toFixed(1) + ' mm';
+  $('shaft_v').textContent = (+$('shaft').value).toFixed(1) + ' mm';
   $('spacing_v').textContent = (+$('spacing').value).toFixed(2) + ' mm';
   $('overhang_v').textContent = $('overhang').value + '°';
-  $('branch_v').textContent = $('branch').value + '°';
-  $('merge_v').textContent = (+$('merge').value).toFixed(2);
+  $('lean_v').textContent = $('lean').value + '°';
   $('parenting_v').textContent = (+$('parenting').value).toFixed(2);
 }
-['tip', 'pillar', 'spacing', 'overhang', 'branch', 'merge', 'parenting']
+['tip', 'shaft', 'spacing', 'overhang', 'lean', 'parenting']
   .forEach(id => $(id).addEventListener('input', showSliderValues));
 
 // ---------------------------------------------------------------- pipeline
@@ -319,9 +304,8 @@ async function runSupports() {
   });
   rebuildMarkers();
 
-  const joins = { resin: 'links', tree: 'merges', pillar: 'braces' }[$('style').value];
   $('stats').innerHTML =
-    `<b>${r.points}</b> supports &middot; <b>${r.braces}</b> ${joins}<br>` +
+    `<b>${r.points}</b> supports &middot; <b>${r.braces}</b> links<br>` +
     `<b>${r.faces.toLocaleString()}</b> triangles` +
     (r.dropped ? `<br><span style="color:var(--warn)"><b>${r.dropped}</b> dropped (no clear path)</span>` : '');
   (r.warnings || []).slice(0, 5).forEach(w => log(w, 'w'));
@@ -414,12 +398,11 @@ document.querySelectorAll('[data-toggle]').forEach(btn => {
 });
 
 // Slider release, not every pixel of drag — each change costs a server round trip.
-['tip', 'pillar'].forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
+['tip', 'shaft'].forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
 ['spacing', 'overhang'].forEach(id => $(id).addEventListener('change', () => rerun('points')));
 $('tipstyle').addEventListener('change', () => rerun('geometry'));
 $('braces').addEventListener('change', () => rerun('geometry'));
-['branch', 'merge', 'parenting'].forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
-$('style').addEventListener('change', () => { syncStyleVisibility(); rerun('geometry'); });
+['lean', 'parenting'].forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
 $('preset').addEventListener('change', async () => {
   if (!state.sid || state.busy) return;
   busy(true);
