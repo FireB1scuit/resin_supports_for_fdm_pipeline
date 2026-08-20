@@ -27,36 +27,22 @@ def _add_param_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--nozzle", type=float, help="nozzle diameter in mm; rederives every dimension")
     g.add_argument("--layer-height", type=float, dest="layer_height")
     g.add_argument("--tip", type=float, dest="tip_diameter", help="contact tip diameter (mm)")
-    g.add_argument("--pillar", type=float, dest="pillar_diameter", help="pillar diameter (mm)")
+    g.add_argument("--shaft", type=float, dest="shaft_lower_diameter", help="shaft diameter (mm)")
     g.add_argument("--spacing", type=float, dest="support_spacing", help="support spacing (mm)")
     g.add_argument("--overhang", type=float, dest="overhang_angle_deg", help="overhang angle (deg)")
     g.add_argument("--tip-style", dest="tip_style", choices=["conical", "spherical"])
     g.add_argument(
-        "--style",
-        dest="support_style",
-        choices=["resin", "tree", "pillar"],
-        help="resin: SLA scaffold of tips, arms, thin shafts and cross-links "
-        "(default). tree: branches that merge into trunks. pillar: one straight "
-        "column per contact",
-    )
-    g.add_argument(
-        "--branch-angle",
+        "--lean",
         type=float,
-        dest="branch_angle_deg",
-        help="how far a branch may lean off vertical (deg); tree only",
-    )
-    g.add_argument(
-        "--merge",
-        type=float,
-        dest="merge_strength",
-        help="0 = branches stay separate, 1 = collapse into a few thick trunks; tree only",
+        dest="strut_lean_deg",
+        help="how far a strut may lean off vertical (deg)",
     )
     g.add_argument(
         "--parenting",
         type=float,
-        help="0 = one shaft per contact, 1 = many tips share a shaft; resin only",
+        help="0 = one shaft per contact, 1 = many tips share a shaft",
     )
-    g.add_argument("--no-braces", action="store_true", help="disable diagonal cross-braces")
+    g.add_argument("--no-braces", action="store_true", help="disable diagonal cross-links")
 
 
 def _params_from_args(args) -> SupportParams:
@@ -70,13 +56,11 @@ def _params_from_args(args) -> SupportParams:
         for k in (
             "layer_height",
             "tip_diameter",
-            "pillar_diameter",
+            "shaft_lower_diameter",
             "support_spacing",
             "overhang_angle_deg",
             "tip_style",
-            "support_style",
-            "branch_angle_deg",
-            "merge_strength",
+            "strut_lean_deg",
             "parenting",
         )
     }
@@ -148,9 +132,8 @@ def cmd_supports(args) -> int:
 
     t0 = time.perf_counter()
     build = supports.build_supports(mesh, points, params)
-    joins = {"resin": "links", "tree": "merges"}.get(params.support_style, "braces")
     print(
-        f"built {len(build.mesh.faces):,} support faces, {build.n_braces} {joins}, "
+        f"built {len(build.mesh.faces):,} support faces, {build.n_braces} links, "
         f"{len(build.dropped)} dropped in {time.perf_counter()-t0:.2f}s"
     )
     for w in build.warnings[:10]:

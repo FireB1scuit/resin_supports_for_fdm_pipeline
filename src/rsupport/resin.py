@@ -33,7 +33,7 @@ diagonal inside the printable band. Same job, same lattice, an angle the nozzle
 can actually lay down. Adapting exactly this kind of thing is the whole point
 of the project.
 
-Collision and reachability come from :class:`rsupport.tree.AvoidanceField`,
+Collision and reachability come from :class:`rsupport.avoidance.AvoidanceField`,
 which is independent of what gets built on top of it: a shaft may never pass
 through the model, and only rests on the model when the plate is genuinely
 unreachable.
@@ -50,9 +50,10 @@ import trimesh
 from scipy.spatial import cKDTree
 from shapely.ops import nearest_points
 
+from .avoidance import AvoidanceField, strut_lean
 from .mesh_io import concat
 from .raycast import DownRay
-from .tree import AvoidanceField, _branch_angle
+from .supports import LineXY, foot_profile, make_strut, mesh_rings, rings_on_axis, tip_profile
 from .types import SupportBuild, SupportParams, SupportPoint
 
 __all__ = ["build_resin", "Shaft", "Arm"]
@@ -283,7 +284,7 @@ def _group_contacts(elbows: np.ndarray, points, params: SupportParams) -> list[n
 
 def _arm_rise(dist: float, params: SupportParams) -> float:
     """Vertical run an arm needs to cover `dist` horizontally and stay printable."""
-    angle = min(float(params.arm_angle_deg), _branch_angle(params))
+    angle = min(float(params.arm_angle_deg), strut_lean(params))
     return dist / max(math.tan(math.radians(max(angle, 1.0))), 1e-6)
 
 
@@ -356,7 +357,7 @@ def _tip_axis(normal: np.ndarray, params: SupportParams) -> np.ndarray:
         # normal; come straight up instead.
         return np.array([0.0, 0.0, params.tip_length])
 
-    max_lean = math.tan(math.radians(_branch_angle(params)))
+    max_lean = math.tan(math.radians(strut_lean(params)))
     flat = float(np.linalg.norm(axis[:2]))
     if flat > axis[2] * max_lean:
         # Too shallow to print: keep the direction, steepen the climb.
@@ -480,11 +481,11 @@ def _link_shafts(field: AvoidanceField, ray: DownRay, shafts: list[Shaft], param
                     # inside the shafts. Capping them would put a flat
                     # downward face — a 90 degree overhang — inside the solid.
                     parts.append(
-                        _strut(
+                        make_strut(
                             p0,
                             p1,
-                            params.brace_diameter * 0.5,
                             params,
+                            radius=params.brace_diameter * 0.5,
                             cap_bottom=False,
                             cap_top=False,
                         )
@@ -517,30 +518,8 @@ def _link_angle(params: SupportParams) -> float | None:
 # --------------------------------------------------------------------------- #
 
 
-def _strut(a, b, radius: float, params: SupportParams, cap_bottom=True, cap_top=True):
-    """A straight strut with horizontal cross-sections.
-
-    Sheared rather than rotated, so the end caps stay flat and horizontal — a
-    rotated cap would be an overhang of ``90 - tilt``.
-    """
-    from .supports import _LineXY, _mesh_rings, _rings_on_axis
-
-    a = np.asarray(a, dtype=np.float64)
-    b = np.asarray(b, dtype=np.float64)
-    lo, hi = (a, b) if a[2] <= b[2] else (b, a)
-    if hi[2] - lo[2] <= _EPS:
-        return None
-    axis = _LineXY(lo, hi)
-    profile = [(float(lo[2]), radius), (float(hi[2]), radius)]
-    return _mesh_rings(
-        _rings_on_axis(axis, profile), params.pillar_sections, cap_bottom, cap_top
-    )
-
-
 def _shaft_meshes(shaft: Shaft, params: SupportParams) -> list[trimesh.Trimesh]:
     """Base, join cone, shaft, arms and tips for one support."""
-    from .supports import _LineXY, _foot_profile, _mesh_rings, _rings_on_axis, _tip_profile
-
     out: list[trimesh.Trimesh] = []
     r_low = params.shaft_lower_diameter * 0.5
     r_up = params.shaft_upper_diameter * 0.5
@@ -558,36 +537,36 @@ def _shaft_meshes(shaft: Shaft, params: SupportParams) -> list[trimesh.Trimesh]:
         profile = [(z0, params.tip_diameter * 0.5), (z0 + tip_len, r_low)]
     else:
         z0 = 0.0
-        profile = list(_foot_profile(0.0, params.foot_height, params.foot_diameter * 0.5, r_low))
+        profile = list(foot_profile(0.0, params.foot_height, params.foot_diameter * 0.5, r_low))
 
     if shaft.top_z > profile[-1][0] + _EPS:
         profile.append((float(shaft.top_z), r_up))
 
-    axis = _LineXY([x, y, z0], [x, y, float(shaft.top_z)])
-    out.append(_mesh_rings(_rings_on_axis(axis, profile), params.pillar_sections))
+    axis = LineXY([x, y, z0], [x, y, float(shaft.top_z)])
+    out.append(mesh_rings(rings_on_axis(axis, profile), params.ring_sections))
 
     for arm in shaft.arms:
-        strut = _strut(
-            arm.attach,
-            arm.elbow,
-            params.arm_diameter * 0.5,
-            params,
-            cap_bottom=False,  # buried in the shaft
-            cap_top=False,  # the tip continues from here
+        out.append(
+            make_strut(
+                arm.attach,
+                arm.elbow,
+                params,
+                radius=params.arm_diameter * 0.5,
+                cap_bottom=False,  # buried in the shaft
+                cap_top=False,  # the tip continues from here
+            )
         )
-        if strut is not None:
-            out.append(strut)
 
         contact = arm.contact
         elbow = arm.elbow
         tip_len = float(contact[2] - elbow[2])
         if tip_len > _EPS:
-            axis = _LineXY(elbow, contact + np.array([0.0, 0.0, params.tip_penetration]))
-            profile = _tip_profile(
+            axis = LineXY(elbow, contact + np.array([0.0, 0.0, params.tip_penetration]))
+            profile = tip_profile(
                 float(contact[2]), tip_len, params, params.arm_diameter * 0.5
             )
             out.append(
-                _mesh_rings(_rings_on_axis(axis, profile), params.pillar_sections, cap_bottom=False)
+                mesh_rings(rings_on_axis(axis, profile), params.ring_sections, cap_bottom=False)
             )
 
     return [m for m in out if m is not None and len(m.faces)]

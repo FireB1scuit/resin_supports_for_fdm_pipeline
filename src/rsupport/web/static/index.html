@@ -185,33 +185,19 @@
     <section>
       <h2>structure</h2>
       <div class="row">
-        <label for="style">style</label>
-        <select id="style" style="width:auto">
-          <option value="resin">resin scaffold</option>
-          <option value="tree">tree</option>
-          <option value="pillar">pillars</option>
-        </select>
-      </div>
-      <div class="row tree-only">
-        <label for="branch">branch lean</label>
-        <input type="range" id="branch" min="20" max="48" step="1">
-        <output id="branch_v"></output>
-      </div>
-      <div class="row tree-only">
-        <label for="merge">merging</label>
-        <input type="range" id="merge" min="0" max="1" step=".05">
-        <output id="merge_v"></output>
-      </div>
-      <div class="row resin-only">
         <label for="parenting">parenting</label>
         <input type="range" id="parenting" min="0" max="1" step=".05">
         <output id="parenting_v"></output>
       </div>
+      <div class="row">
+        <label for="lean">strut lean</label>
+        <input type="range" id="lean" min="20" max="48" step="1">
+        <output id="lean_v"></output>
+      </div>
       <p style="color:var(--dim); font-size:11px; margin:2px 0 0">
-        <span class="resin-only">SLA scaffold: tips on angled arms, thin vertical
-        shafts, cross-linked. Parenting is how many tips share a shaft.</span>
-        <span class="tree-only">Branches merge on the way down into thicker trunks.</span>
-        <span class="pillar-only">One straight column per contact.</span>
+        SLA scaffold: tips on angled arms, thin vertical shafts, cross-linked.
+        Parenting is how many tips share a shaft; lean is how far anything may
+        tip off vertical before it stops printing.
       </p>
     </section>
 
@@ -223,9 +209,9 @@
         <output id="tip_v"></output>
       </div>
       <div class="row">
-        <label for="pillar">pillar &oslash;</label>
-        <input type="range" id="pillar" min=".8" max="2.5" step=".1">
-        <output id="pillar_v"></output>
+        <label for="shaft">shaft &oslash;</label>
+        <input type="range" id="shaft" min=".8" max="2.5" step=".1">
+        <output id="shaft_v"></output>
       </div>
       <div class="row">
         <label for="spacing">spacing</label>
@@ -244,8 +230,8 @@
           <option value="spherical">spherical</option>
         </select>
       </div>
-      <div class="row pillar-only">
-        <label for="braces">cross-braces</label>
+      <div class="row">
+        <label for="braces">cross-links</label>
         <input type="checkbox" id="braces" checked>
       </div>
     </section>

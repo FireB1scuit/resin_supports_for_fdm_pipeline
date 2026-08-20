@@ -7,9 +7,9 @@ nozzles rescales the whole support system coherently instead of leaving a
 The anchor values come from the Resin2FDM documentation, which is the closest
 thing to a published spec for "resin-style supports that survive on FDM":
 
-    pillar    1.2 - 2.0 mm   (start at 1.5 if they snap)
+    shaft     1.2 - 2.0 mm   (start at 1.5 if they snap)
     tip       0.3 - 0.6 mm   (as small as the printer can reliably print)
-    braces    diagonal, so isolated pillars hold each other up
+    links     diagonal, so isolated shafts hold each other up
     supports sliced at ~2x the model's layer height
 """
 
@@ -18,16 +18,16 @@ from __future__ import annotations
 from .types import SupportParams
 
 # Multipliers relating each feature to the nozzle diameter. Chosen so a 0.2 mm
-# nozzle lands on the documented defaults (tip 0.3, pillar 1.2).
+# nozzle lands on the documented defaults (tip 0.3, shaft 1.2).
 _TIP_RATIO = 1.5  # tip must be at least ~1.5 extrusion widths to be printable
-_PILLAR_RATIO = 6.0
-_BRACE_RATIO = 4.0
+_SHAFT_RATIO = 6.0
+_LINK_RATIO = 4.0
 
 # Below this the tip stops being a tip and starts being a scar.
 _TIP_MIN = 0.25
 _TIP_MAX = 0.6
-_PILLAR_MIN = 1.0
-_PILLAR_MAX = 2.0
+_SHAFT_MIN = 1.0
+_SHAFT_MAX = 2.0
 
 
 def from_nozzle(
@@ -52,38 +52,37 @@ def from_nozzle(
         layer_height = min(0.12, max(0.08, round(n * 0.4, 3)))
 
     tip = _clamp(n * _TIP_RATIO, _TIP_MIN, _TIP_MAX)
-    pillar = _clamp(n * _PILLAR_RATIO, _PILLAR_MIN, _PILLAR_MAX)
-    brace = _clamp(n * _BRACE_RATIO, n * 2.0, pillar * 0.8)
+    shaft = _clamp(n * _SHAFT_RATIO, _SHAFT_MIN, _SHAFT_MAX)
+    link = _clamp(n * _LINK_RATIO, n * 2.0, shaft * 0.8)
 
     params = SupportParams(
         nozzle_diameter=n,
         layer_height=layer_height,
         support_layer_height=round(layer_height * 2, 3),
         tip_diameter=round(tip, 3),
-        tip_length=round(max(1.0, pillar), 3),
+        tip_length=round(max(1.0, shaft), 3),
         tip_penetration=round(max(0.05, layer_height * 1.25), 3),
-        pillar_diameter=round(pillar, 3),
-        brace_diameter=round(brace, 3),
-        foot_diameter=round(max(4.0, pillar * 4.0), 3),
+        brace_diameter=round(link, 3),
+        foot_diameter=round(max(4.0, shaft * 4.0), 3),
         # A tip cannot bridge, so points must sit closer together than the
         # printer's reliable bridging distance.
-        max_unsupported_span=round(max(4.0, pillar * 4.0), 3),
-        # --- tree ---
+        max_unsupported_span=round(max(4.0, shaft * 4.0), 3),
+        # --- routing and collision ---
         # Clearance has to clear the printer's own imprecision, so it scales
         # with the nozzle rather than being a fixed gap.
         xy_clearance=round(max(0.3, n * 2.0), 3),
         # Sampling finer than a couple of support layers buys nothing: the
         # slicer cannot follow the model that closely anyway.
-        tree_layer_pitch=round(max(0.4, layer_height * 6.0), 3),
-        # A trunk carrying a dozen branches needs real section, but past this
-        # it stops being removable by hand.
-        max_branch_diameter=round(pillar * 2.5, 3),
-        # --- resin scaffold ---
+        collision_pitch=round(max(0.4, layer_height * 6.0), 3),
+        # Nothing in the scaffold gets this fat, but the avoidance field has to
+        # bracket the widest thing it may be asked about.
+        max_strut_diameter=round(shaft * 2.5, 3),
+        # --- scaffold ---
         # Resin shafts run roughly 0.6 mm at the top to 1.2 mm at the bottom.
         # The ratio carries over; the absolute sizes come from the nozzle.
-        shaft_upper_diameter=round(max(n * 3.0, pillar * 0.55), 3),
-        shaft_lower_diameter=round(pillar, 3),
-        arm_diameter=round(max(n * 2.5, pillar * 0.5), 3),
+        shaft_upper_diameter=round(max(n * 3.0, shaft * 0.55), 3),
+        shaft_lower_diameter=round(shaft, 3),
+        arm_diameter=round(max(n * 2.5, shaft * 0.5), 3),
     )
     return params.with_(**overrides)
 
