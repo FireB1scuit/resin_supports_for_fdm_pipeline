@@ -122,17 +122,31 @@ Buttons top-left toggle each layer:
 |---|---|
 | **model** | the miniature, grey |
 | **supports** | the generated geometry, orange |
-| **contact points** | a red dot at every point a support touches. **Off by default — turn it on to edit supports** |
+| **contact points** | a dot at every point a support touches, in two reds. **Off by default — turn it on to edit supports** |
 | **wireframe** | see through the model |
 
 Drag to orbit, scroll to zoom.
+
+The two reds are the whole point of that third toggle:
+
+| | |
+|---|---|
+| faded red | a contact that got a support |
+| solid deep red, slightly larger | a contact **nothing could reach** — that overhang is going to print unheld |
+
+Held points are washed out deliberately: there are hundreds of them and they are
+covering the surface you are trying to look at. The unheld ones are usually a
+handful, and they are the ones worth doing something about — raise **strut
+lean**, drop the **lift**, or delete the point and shift-click a replacement
+somewhere with a clearer run down to the plate. The count is in the stats panel
+too, but a number in a sidebar does not tell you *where*.
 
 ## Editing supports by hand
 
 The automatic placement is a starting point, not a verdict.
 
-- **Delete one** — turn on **contact points**, then click a red dot. (Clicking
-  does nothing while that layer is hidden.)
+- **Delete one** — turn on **contact points**, then click a dot, either colour.
+  (Clicking does nothing while that layer is hidden.)
 - **Add one** — shift-click anywhere on the model. Hand-placed supports are
   marked mandatory and never get thinned away.
 
@@ -152,10 +166,12 @@ Either edit rebuilds only the geometry, so it comes back in well under a second.
 | **overhang** | the angle at which a face is judged to need support | steep walls are being supported unnecessarily (lower) or a shallow slope droops (raise) |
 | **tip style** | conical or spherical contact | spherical snaps off cleaner but grips less |
 | **cross-links** | diagonal struts between slender shafts | turn off only if removal is a nightmare — they exist so tips can stay thin |
+| **supports from plate only** | every support must reach the bed; one that cannot is left unheld and reported | leave it on. Unticking it only lets a blocked shaft stop where it is — supports that *start* on the model are not implemented yet |
 | **base ø** | width of the disc each shaft stands on | supports peel off the plate mid-print (raise); the raft is welded to the bed and impossible to remove (lower) |
 | **base height** | how tall that disc is | the same trade, but height buys grip without eating more bed area |
 
-Changing **tip ø**, **shaft ø**, **tip style**, **cross-links** or either **base**
+Changing **tip ø**, **shaft ø**, **tip style**, **cross-links**, **supports from
+plate only** or either **base**
 dimension rebuilds geometry only, which is fast. Changing **spacing** or
 **overhang** re-decides where supports go, which takes a moment longer. Changing
 **lift** moves the model, so it redoes both. Sliders act on release, not on drag.
@@ -241,6 +257,7 @@ Useful flags for `supports`:
 | `--lean DEG` | how far a strut may lean off vertical |
 | `--parenting 0..1` | how many tips share a shaft |
 | `--no-braces` | drop the cross-links |
+| `--allow-model-landings` | let a blocked shaft stop on the model instead of being refused |
 | `--auto-orient` | re-pose first (off by default) |
 
 `python -m rsupport.cli serve` starts the same web app.
@@ -266,8 +283,9 @@ Useful flags for `supports`:
 | Too many separate feet to snap off | raise **parenting** — more tips will share a shaft |
 | An overhang sagged | lower **spacing**, raise **overhang**; or shift-click extra supports exactly where it drooped |
 | A thin part printed in mid-air | that region had no support — shift-click to add one; report it, islands are meant to be caught automatically |
-| Log says *"N shaft(s) stand on the model"* | there was no way down to the plate from there. Those shafts end in a tip, so they still snap off; raise **strut lean** to let one reach further sideways |
-| Log says *"N contact point(s) had nowhere to stand a shaft"* | that overhang is unheld — shift-click a support somewhere with a clear run down, or raise **strut lean** |
+| Log says *"N contact point(s) left unsupported"* | nothing could be routed to the plate from there. Raise **strut lean** so a shaft can travel further sideways per layer, lower the model's **lift** so there is more room beside it, or shift-click a support somewhere with a clearer run down |
+| Log says *"N contact point(s) could not be reached by a tip"* | the contact sits in a pocket every approach angle runs into — usually a dimple on an upward-facing surface that barely qualified as an overhang. Normally safe to ignore; raise **overhang** so it stops qualifying |
+| Log says *"N shaft(s) stand on the model"* | only with **supports from plate only** unticked. There was no way down to the plate; those shafts end in a tip, so they still snap off |
 
 ## Known limits
 
@@ -276,10 +294,16 @@ Useful flags for `supports`:
 - A handful of support undersides overhang where a support lands on a feature
   narrower than itself — short bridges off anchored material, not floating
   islands. Reported in the log and budgeted in `tests/test_pipeline.py`.
-- Shafts descend straight down. That is what an SLA shaft does, and it keeps the
-  scaffold readable and easy to cut off, but it means a contact with model
-  directly beneath it all the way to the plate rests on the model rather than
-  walking out sideways to reach the bed.
+- **Supports cannot start on the model.** A shaft routes around obstacles to
+  reach the plate, and where no route exists the contact is refused rather than
+  propped off the sculpt. A support rooted *on* the model — the thing a resin
+  slicer does under a cloak or between two arms — is not built. On the sample
+  mini that leaves a few percent of contacts unheld; they are reported in the
+  log, and unticking **supports from plate only** currently buys only a
+  last-resort landing where the shaft stops, not a real branch off the model.
+- A shaft that has to route around something comes down beside it rather than
+  under its contact, so its base disc can end up smaller than **base ø** asks
+  for — it is shrunk to whatever fits without fusing into the wall it passed.
 - Auto-orientation rarely picks a tilted pose for a model with a flat base.
 - Detail detection cannot tell a sculpted face from a machined edge, so the
   "keep supports off the detail" scoring suits organic models, not brackets.
@@ -493,7 +517,7 @@ points. The shallowest angle in the band wins (42°, two degrees of margin):
 every degree shallower is more horizontal span for the same vertical run, and
 vertical run is the scarce thing on a short support.
 
-### Reachability: one sweep, two guarantees
+### Reachability: one sweep, every guarantee
 
 "Can a strut here get down to the plate?" is a question about the entire column
 of layers below it, so no local "is something directly beneath me" test can
@@ -523,7 +547,15 @@ that was already provably legal below. Everything else falls out:
 - and since every position is inside `free` for its own radius, no support can
   intersect the model at all.
 
-Both guarantees are structural, not a check-and-reject afterwards.
+All of that is structural, not a check-and-reject afterwards. The descent that
+reads this out is `resin._route_to_plate`, and the induction above is exactly
+why it needs no search and cannot dead-end: every position it is standing on has
+a legal successor one layer down, by construction.
+
+What the sweep does *not* cover is anything not routed through it — arms, tips
+and cross-links are placed by geometry, so each is tested separately by
+`resin._strut_clear` (a parity test against the model, plus the same
+`xy_clearance`). A shaft was never the only thing that could cross a sculpt.
 
 Buffering every layer at every distinct radius would be ruinous, so collision is
 sampled at **6 radii spaced geometrically** from `tip_diameter/2` to

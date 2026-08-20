@@ -114,6 +114,11 @@ class AvoidanceField:
         # as "collision resolution".
         tol = max(p.nozzle_diameter * 0.25, 1e-3)
 
+        # Kept un-grown as well as grown. The grown copies answer "may a strut
+        # of radius r stand here"; the raw outline answers "how fat may a strut
+        # standing here be", which is what a base disc needs — see `room`.
+        self._solid = solids
+
         self._free: list[list] = []
         self._reach: list[list] = []
         for r in self.radii:
@@ -162,6 +167,23 @@ class AvoidanceField:
 
     def standable(self, bucket: int, layer: int, to_plate: bool):
         return self.reach(bucket, layer) if to_plate else self.free(bucket, layer)
+
+    def room(self, xy, layer: int) -> float:
+        """Fattest radius anything standing at `xy` on this layer could have.
+
+        The bucketed ``free`` maps answer the question the other way round —
+        given a radius, where may it stand — which is the right shape for
+        routing a strut of known width. A base disc is the opposite case: it is
+        placed wherever the shaft came down, and the question is how much of it
+        fits. Buckets are far too coarse to answer that (they stop at
+        ``max_strut_diameter``, and a foot is several times fatter), so this
+        measures the real distance to the model and takes the clearance off it.
+        """
+        solid = self._solid[int(np.clip(layer, 0, self.n_layers - 1))]
+        if solid is None or solid.is_empty:
+            return float("inf")
+        gap = float(solid.distance(shapely.Point(float(xy[0]), float(xy[1]))))
+        return max(0.0, gap - self.params.xy_clearance)
 
     def contains(self, region, xy) -> bool:
         if region is None or region.is_empty:

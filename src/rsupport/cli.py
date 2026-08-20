@@ -55,6 +55,12 @@ def _add_param_args(p: argparse.ArgumentParser) -> None:
         help="0 = one shaft per contact, 1 = many tips share a shaft",
     )
     g.add_argument("--no-braces", action="store_true", help="disable diagonal cross-links")
+    g.add_argument(
+        "--allow-model-landings",
+        action="store_true",
+        help="let a shaft stand on the model where the plate cannot be routed to "
+        "(partial: the shaft stops where it is rather than starting from the model)",
+    )
 
 
 def _params_from_args(args) -> SupportParams:
@@ -82,6 +88,8 @@ def _params_from_args(args) -> SupportParams:
     overrides = {k: v for k, v in overrides.items() if v is not None}
     if getattr(args, "no_braces", False):
         overrides["brace_enabled"] = False
+    if getattr(args, "allow_model_landings", False):
+        overrides["plate_only"] = False
     return params.with_(**overrides)
 
 

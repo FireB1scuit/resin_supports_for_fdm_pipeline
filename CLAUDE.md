@@ -95,12 +95,38 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   inside the printable band. Adapting resin conventions to what a nozzle can do is the
   point of the project, so make the adaptation and say why — do not copy the resin value
   and hope.
-- **Two guarantees, both structural rather than checked after the fact.** A support never
-  enters the model, and only ever rests on the model when the plate is genuinely
-  unreachable. Both come from the bottom-up reachability sweep in
-  `avoidance.AvoidanceField`; do not replace it with a local "is there something below me"
-  test, which cannot answer either question. `tests/test_avoidance.py` pins the sweep and
-  `tests/test_resin.py` pins the two guarantees it buys.
+- **Nothing the generator builds may enter the model. This is a guarantee, not a
+  preference**, and it covers every strut, not just the shafts:
+  - A **shaft** is routed, not dropped. `resin._route_to_plate` walks the reachability
+    maps in `avoidance.AvoidanceField` down a layer at a time, sliding sideways to the
+    nearest still-reachable position wherever the column below is blocked. Because
+    `reach[i] = free[i] ∩ reach[i-1].buffer(max_move)`, a position inside `reach` always
+    has a successor within one layer's travel — so the descent needs no search, no
+    backtracking, and cannot dead-end. Something directly below a contact is a reason to
+    lean, never a reason to stop. Do not replace the sweep with a local "is there
+    something below me" test, which cannot answer the question at all.
+  - An **arm, tip or cross-link** is placed by geometry rather than routed, so it is
+    asked: `resin._strut_clear` parity-tests it against the model and holds it
+    `xy_clearance` clear. This is not optional decoration. The generator once let
+    `_absorb_neighbours` hand a stubby shaft the arms of a contact 25 mm above it, and
+    what got built was a 26 mm near-vertical spear through the middle of the sculpt —
+    invisible to every shaft-only check in the suite.
+  - A **base disc** is several times fatter than its shaft, and a routed shaft comes down
+    hard against the clearance boundary of whatever it stepped around. `resin._foot_radius`
+    shrinks the disc to fit rather than fusing it into a wall. Overlap at z=0 is still
+    fine and deliberate — that is the raft.
+  `tests/test_avoidance.py` pins the sweep; `tests/test_resin.py` pins the guarantees it
+  buys, and samples shafts along `xy_at` rather than assuming one XY.
+- **`plate_only` is on by default: the build plate is the only landing.** A contact with
+  no collision-free route down is left unheld and reported in `SupportBuild.warnings`,
+  rather than propped off the sculpt. That trade is deliberate and measured both ways in
+  `tests/test_pipeline.py`: `DROP_BUDGET` (routing allowed to land on the model, ~1%)
+  against `PLATE_ONLY_DROP_BUDGET` (the shipped default, ~8% on the sample mini — dimples
+  on the upper surface of the head, where every route in crosses the head itself).
+  Turning it off enables only the crude last-resort landing in `resin._drop_shaft`.
+  Supports that *start* on the model — a shaft rooted on the sculpt and branching from
+  there — are **not implemented**; the UI checkbox says so. Do not quietly implement them
+  behind the flag.
 - The base is a **disc, then a flare**, not a plain cone. A cone is at its full width for
   exactly one layer, so what grips the glass is a ring of extrusion; the straight-walled
   disc is the part that sticks, and with a lifted model the discs of neighbouring supports

@@ -102,6 +102,38 @@ def test_supports_geometry_absent_until_built(client, stl_bytes):
     assert client.get(f"/api/mesh/{sid}/supports").status_code == 404
 
 
+def test_dropped_contacts_come_back_as_indices_not_just_a_count(client):
+    """The viewer draws unheld contacts in a solid red, so it has to know *which*
+    ones they are. A sphere sitting on a block has both kinds: the block's own
+    lifted underside is easy, and the sphere's underside has 20 mm of block
+    directly beneath it and no way round in the height available."""
+    block = trimesh.creation.box(extents=[20, 20, 20])
+    block.apply_translation([0, 0, 10])
+    cap = trimesh.creation.icosphere(subdivisions=3, radius=9)
+    cap.apply_translation([0, 0, 30])  # its underside sits right over the block
+    buf = io.BytesIO()
+    trimesh.util.concatenate([block, cap]).export(buf, file_type="stl")
+
+    sid = _upload(client, buf.getvalue(), "capped.stl").json()["id"]
+    client.post(f"/api/points/{sid}", json={})
+    body = client.post(f"/api/supports/{sid}", json={}).json()
+
+    idx = body["dropped_points"]
+    assert len(idx) == body["dropped"], "count and indices must agree"
+    assert idx, "contacts under the sphere have 20 mm of block beneath them"
+    assert all(0 <= i < body["points"] for i in idx)
+    assert len(set(idx)) == len(idx)
+
+
+def test_nothing_is_dropped_when_everything_is_reachable(client, stl_bytes):
+    sid = _upload(client, stl_bytes).json()["id"]
+    client.post(f"/api/points/{sid}", json={})
+    body = client.post(f"/api/supports/{sid}", json={}).json()
+
+    assert body["points"] > 0, "a floated cube's underside needs holding"
+    assert body["dropped_points"] == []
+
+
 def test_index_page_is_served(client):
     body = client.get("/").text
     assert "resin supports for FDM" in body

@@ -337,12 +337,42 @@ def test_point_over_solid_geometry_never_pierces_the_model():
 
 
 def test_support_above_a_block_stops_at_the_block():
+    """Dead centre over a 10 mm block with only 3 mm of air above it: there is
+    nowhere near enough height to lean out past 5 mm of block, so the block's
+    own top is the only landing there is. Needs `plate_only` off; the default
+    refuses the contact instead — see below."""
     model = solid_box(10.0)
-    build = build_supports(model, [down_point(0.0, 0.0, 13.0)], PARAMS)
+    params = PARAMS.with_(plate_only=False)
+    build = build_supports(model, [down_point(0.0, 0.0, 13.0)], params)
 
     assert build.n_points == 1
     # Nothing may be buried more than the deliberate penetration.
-    assert build.mesh.bounds[0][2] > 10.0 - 2 * PARAMS.tip_penetration
+    assert build.mesh.bounds[0][2] > 10.0 - 2 * params.tip_penetration
+
+
+def test_plate_only_refuses_a_contact_it_cannot_route_to_the_plate():
+    """The same scene under the shipped default: rather than stand on the block,
+    the contact is left unheld and reported."""
+    model = solid_box(10.0)
+    build = build_supports(model, [down_point(0.0, 0.0, 13.0)], PARAMS)
+
+    assert build.n_points == 0
+    assert len(build.dropped) == 1
+    assert any("unsupported" in w for w in build.warnings)
+
+
+def test_a_contact_high_enough_above_a_block_routes_past_it_to_the_plate():
+    """Give the same block enough headroom and the shaft leans out from over the
+    middle of it, clears the edge, and carries on to the plate. This is what
+    `plate_only` is betting on."""
+    model = solid_box(10.0)
+    build = build_supports(model, [down_point(0.0, 0.0, 30.0)], PARAMS)
+
+    assert build.n_points == 1
+    assert not build.dropped
+    assert build.mesh.bounds[0][2] == pytest.approx(0.0, abs=1e-6), "it reached the plate"
+    inside = DownRay(model).inside(build.mesh.vertices)
+    assert not inside.any(), "and it did not go through the block to get there"
 
 
 def test_dropped_points_are_reported_not_lost():

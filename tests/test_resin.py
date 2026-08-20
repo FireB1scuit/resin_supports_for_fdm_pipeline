@@ -59,6 +59,11 @@ def hollow_box(outer=20.0, inner=12.0) -> trimesh.Trimesh:
 def _pierces(shafts, ray, samples=12):
     """Count sampled points along the shafts that are inside the model.
 
+    Sampled along each shaft's actual axis, which is a polyline once the shaft
+    has had to route around something. Asking `xy_at` rather than assuming a
+    single XY is the whole difference between checking the strut that gets
+    built and checking a straight line between its two ends.
+
     Skips the bottom of a model landing, which is deliberately sunk
     `tip_penetration` into the surface so its base is not a floating layer.
     """
@@ -67,10 +72,23 @@ def _pierces(shafts, ray, samples=12):
         lo = s.land_z + PARAMS.tip_length if s.on_model else s.land_z
         if s.top_z - lo <= 1e-9:
             continue
-        z = np.linspace(lo, s.top_z, samples)
-        pts = np.column_stack([np.full(samples, s.xy[0]), np.full(samples, s.xy[1]), z])
+        # At least a couple of samples per path vertex, so a detour cannot slip
+        # between two of them.
+        n = max(samples, len(s.path) * 2)
+        z = np.linspace(lo, s.top_z, n)
+        pts = np.array([[*s.xy_at(zz), zz] for zz in z])
         hits += int(ray.inside(pts).sum())
     return hits
+
+
+def _arms_pierce(shafts, ray):
+    """Arms and tips that cross the model on their way to a contact."""
+    bad = 0
+    for s in shafts:
+        for a in s.arms:
+            bad += int(ray.segment_blocked([a.attach], [a.elbow])[0])
+            bad += int(ray.segment_blocked([a.elbow], [a.contact])[0])
+    return bad
 
 
 def test_no_shaft_passes_through_the_model():
@@ -81,6 +99,19 @@ def test_no_shaft_passes_through_the_model():
     assert _pierces(shafts, ray) == 0
 
 
+def test_no_arm_or_tip_passes_through_the_model():
+    """The shaft was never the only thing that could cross the sculpt. An arm
+    reaching up to a contact is a strut like any other, and one that leaves a
+    shaft standing on the wrong side of the model is a spear through the middle
+    of it."""
+    model = mesh_io.drop_to_bed(mesh_io.load("samples/synthetic_mini.stl"), lift=5.0)
+    params = PARAMS.with_(lift_height=5.0)
+    points = sampling.place_points(model, params)
+    shafts, _, _, ray, _ = plan(model, points, params)
+    assert shafts
+    assert _arms_pierce(shafts, ray) == 0
+
+
 def test_no_shaft_passes_through_an_awkward_shape():
     """The C-bracket: everything below a contact is model, and the only way out
     is sideways."""
@@ -89,6 +120,41 @@ def test_no_shaft_passes_through_an_awkward_shape():
     shafts, _, _, ray, _ = plan(model, points)
     assert shafts
     assert _pierces(shafts, ray) == 0
+    assert _arms_pierce(shafts, ray) == 0
+
+
+# --------------------------------------------------------------------------- #
+# 1b. routing around, rather than stopping at
+# --------------------------------------------------------------------------- #
+
+
+def test_a_blocked_shaft_leans_around_the_obstruction_and_reaches_the_plate():
+    """The C-bracket again, and the point of the whole exercise. Everything
+    directly below the contact is model; the plate is reachable only by leaning
+    out from under the arm and past the slab. Stopping on the slab is what the
+    generator used to do."""
+    model = mesh_io.drop_to_bed(bracket())
+    shafts, dropped, _, ray, _ = plan(model, [down_point(-1.0, 0.0, 12.0)])
+
+    assert shafts and not dropped
+    shaft = shafts[0]
+    assert not shaft.on_model, "the plate is reachable from there"
+    assert shaft.land_z == pytest.approx(0.0, abs=1e-9)
+    assert shaft.detours > 0, "a straight drop from there would be inside the slab"
+    # It came down somewhere else entirely from where it topped out.
+    assert float(np.linalg.norm(shaft.base_xy - shaft.xy)) > 1.0
+    assert _pierces(shafts, ray) == 0
+
+
+def test_a_shaft_with_a_clear_column_still_drops_dead_straight():
+    """Routing must not cost anything when there is nothing to route around: an
+    SLA shaft is a straight vertical stick and the common case has to stay
+    one."""
+    model = mesh_io.drop_to_bed(table(bar_z=12.0))
+    shafts, *_ = plan(model, bar_points(z=12.0))
+    assert shafts
+    assert all(s.detours == 0 for s in shafts)
+    assert all(len(s.path) == 2 for s in shafts), "no wasted rings on a straight shaft"
 
 
 def test_geometry_never_enters_the_model():
@@ -122,13 +188,31 @@ def test_nothing_rests_on_the_model_when_the_plate_is_clear():
 
 def test_a_sealed_cavity_falls_back_to_resting_on_the_model():
     """The fallback still has to work: inside a sealed void there is no way
-    down, so the shaft rests on the floor of the cavity and says so."""
+    down, so the shaft rests on the floor of the cavity and says so.
+
+    Only reachable with `plate_only` off, which is not the shipped default — see
+    the test below."""
+    model = hollow_box()
+    ceiling = model.bounds[1][2] - 4.0
+    params = PARAMS.with_(plate_only=False)
+    build = build_resin(model, [down_point(0.0, 0.0, ceiling)], params)
+
+    assert build.mesh.bounds[0][2] == pytest.approx(4.0, abs=0.6), "should sit on the cavity floor"
+    assert any("stand on the model" in w for w in build.warnings)
+
+
+def test_plate_only_leaves_a_sealed_cavity_unsupported_rather_than_propped():
+    """The shipped default. Nothing inside a sealed void can reach the plate, so
+    the contact is refused and reported rather than propped off the sculpt."""
+    assert PARAMS.plate_only, "plate-only is the default"
     model = hollow_box()
     ceiling = model.bounds[1][2] - 4.0
     build = build_resin(model, [down_point(0.0, 0.0, ceiling)], PARAMS)
 
-    assert build.mesh.bounds[0][2] == pytest.approx(4.0, abs=0.6), "should sit on the cavity floor"
-    assert any("stand on the model" in w for w in build.warnings)
+    assert len(build.dropped) == 1
+    assert build.n_points == 0
+    assert any("unsupported" in w for w in build.warnings)
+    assert any("not implemented yet" in w for w in build.warnings)
 
 
 # --------------------------------------------------------------------------- #
