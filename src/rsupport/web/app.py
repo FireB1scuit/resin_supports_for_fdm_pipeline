@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import trimesh
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
@@ -90,6 +91,14 @@ class ParamPatch(BaseModel):
 class OrientRequest(ParamPatch):
     pick: int = 0
     skip: bool = False  # keep the model's existing pose
+
+
+class RotateRequest(ParamPatch):
+    #: Degrees, always applied fresh from the file's own pose — not
+    #: accumulated — so the sliders stay an absolute, reversible readout.
+    rx: float = 0.0
+    ry: float = 0.0
+    rz: float = 0.0
 
 
 class PointsRequest(ParamPatch):
@@ -187,6 +196,40 @@ def api_orient(sid: str, req: OrientRequest) -> dict:
         "elapsed": time.perf_counter() - t0,
         "applied": session.applied,
         "orientations": [o.as_dict() for o in session.orientations],
+        "summary": mesh_io.summary(session.oriented),
+    }
+
+
+@app.post("/api/rotate/{sid}")
+def api_rotate(sid: str, req: RotateRequest) -> dict:
+    """Manual rotation about the model's own X, Y, then Z axes, in degrees.
+
+    Always applied from ``session.original`` rather than composed onto the
+    current pose, so the three sliders stay an absolute readout — dialling
+    them back to 0/0/0 reproduces the file's pose exactly, the same as
+    ``skip`` does for the (opt-in, CLI-only from the UI's perspective) search
+    in :func:`api_orient`.
+    """
+    session = _get(sid)
+    session.params = _resolve_params(session, req)
+
+    t0 = time.perf_counter()
+    rot = trimesh.transformations.euler_matrix(
+        np.radians(req.rx), np.radians(req.ry), np.radians(req.rz), axes="sxyz"
+    )
+    rotated = session.original.copy()
+    rotated.apply_transform(rot)
+
+    session.orientations = []
+    session.applied = 0
+    session.grounded = mesh_io.drop_to_bed(rotated)
+    session.oriented = mesh_io.set_lift(session.grounded, session.params.lift_height)
+
+    # A rotation invalidates everything downstream, same as a reorient.
+    session.points = []
+    session.supports = None
+    return {
+        "elapsed": time.perf_counter() - t0,
         "summary": mesh_io.summary(session.oriented),
     }
 

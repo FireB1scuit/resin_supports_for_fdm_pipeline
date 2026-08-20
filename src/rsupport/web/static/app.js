@@ -8,8 +8,6 @@ const state = {
   sid: null,
   points: [],          // [{position:[x,y,z], normal:[..], forced, source}]
   params: null,        // last params the server reported back
-  orientations: [],
-  applied: 0,
   busy: false,
 };
 
@@ -242,8 +240,9 @@ async function upload(file) {
       info.summary.size.map(v => v.toFixed(1)).join(' × ') + ' mm';
     if (!info.summary.watertight) log('mesh is not watertight; results may be rough', 'w');
     $('drop').classList.add('hide');
-    $('autorotate').disabled = false;
     $('asloaded').disabled = false;
+    $('rotx').value = 0; $('roty').value = 0; $('rotz').value = 0;
+    showRotationValues();
 
     // The file is taken as posed. It arrives already dropped onto the bed, so
     // there is nothing to decide — go straight to working out where supports go.
@@ -260,24 +259,22 @@ async function upload(file) {
   }
 }
 
-/** Opt-in only. Off the default path — see the orientation panel. */
-async function runOrient(pick = 0, skip = false) {
-  log(skip ? 'restoring the file’s pose …' : 'searching for a better orientation …');
-  const r = await postJSON(`/api/orient/${state.sid}`, { pick, skip, overrides: overrides() });
-  state.orientations = r.orientations;
-  state.applied = r.applied;
-  renderOrientations();
+/** Rotation sliders are absolute, always applied from the file's own pose —
+ *  so re-running with all three at 0 is exactly the file's pose. */
+async function runRotate() {
+  const rx = +$('rotx').value, ry = +$('roty').value, rz = +$('rotz').value;
+  log('rotating the model …');
+  const r = await postJSON(`/api/rotate/${state.sid}`, { rx, ry, rz, overrides: overrides() });
   await loadSTL(`/api/mesh/${state.sid}/model`, 'model');
   frameModel();
-  const label = r.orientations[r.applied]?.label ?? 'the file’s pose';
-  log(`using ${label} (${r.elapsed.toFixed(2)}s)`, 'g');
+  log(`rotated (${r.elapsed.toFixed(2)}s)`, 'g');
 }
 
-async function reorient(pick, skip) {
+async function rerotate() {
   if (!state.sid || state.busy) return;
   busy(true);
   try {
-    await runOrient(pick, skip);
+    await runRotate();
     await runPoints();
     await runSupports();
   } catch (err) {
@@ -287,8 +284,21 @@ async function reorient(pick, skip) {
   }
 }
 
-$('autorotate').onclick = () => reorient(0, false);
-$('asloaded').onclick = () => reorient(0, true);
+function showRotationValues() {
+  $('rotx_v').textContent = $('rotx').value + '°';
+  $('roty_v').textContent = $('roty').value + '°';
+  $('rotz_v').textContent = $('rotz').value + '°';
+}
+['rotx', 'roty', 'rotz'].forEach(id => {
+  $(id).addEventListener('input', showRotationValues);
+  $(id).addEventListener('change', rerotate);
+});
+
+$('asloaded').onclick = () => {
+  $('rotx').value = 0; $('roty').value = 0; $('rotz').value = 0;
+  showRotationValues();
+  rerotate();
+};
 
 async function runPoints() {
   log('placing support points …');
@@ -352,21 +362,6 @@ async function rerun(scope) {
   } finally {
     busy(false);
   }
-}
-
-function renderOrientations() {
-  const host = $('orients');
-  host.innerHTML = '';
-  if (!state.orientations.length) return;
-
-  state.orientations.forEach((o, i) => {
-    const b = document.createElement('button');
-    b.className = 'orient' + (i === state.applied ? ' on' : '');
-    b.innerHTML = `<span>${o.label || 'candidate ' + i}</span><small>${o.score.toFixed(3)}</small>`;
-    b.title = Object.entries(o.terms).map(([k, v]) => `${k}: ${v.toFixed(3)}`).join('\n');
-    b.onclick = () => reorient(i, false);
-    host.appendChild(b);
-  });
 }
 
 // ------------------------------------------------------------- interaction

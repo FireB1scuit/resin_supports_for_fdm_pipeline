@@ -59,8 +59,9 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   it. Do not raise it to make a test pass.
 - **Models arrive pre-posed.** The input STL is assumed to already be rotated the way it
   should print; the pipeline only sets it down on the bed. Auto-orientation exists in
-  `orient.py` but is **opt-in** (`--auto-orient`, or the button in the UI) and must never
-  be on the default path.
+  `orient.py` and is reachable from the CLI (`--auto-orient`) and from `POST /api/orient`,
+  but is **opt-in** and must never be on the default path. The UI has no button for it —
+  only manual rotation sliders (`POST /api/rotate`) and the "file's pose" reset.
 - **The plate is z=0, and by default the model is not on it.** `lift_height` (default
   5 mm, slider 0-20) floats the whole model and the scaffold carries it, exactly as a
   resin print does. Consequences, all of them load-bearing:
