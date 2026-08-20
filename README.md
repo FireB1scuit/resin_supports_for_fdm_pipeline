@@ -80,6 +80,10 @@ as Docker is. It stays down only if you stopped it deliberately:
 docker compose stop
 ```
 
+One trap: Docker records `stop` **and `kill`** as a deliberate stop, and a
+deliberately stopped container does not come back on its own — not on a crash,
+not when Docker next starts. `docker compose start` (or `up -d`) re-arms it.
+
 Same privacy story as running it locally: sessions are in memory, exports go to
 a tempdir, and `tmpfs` wipes both when the container stops. Nothing is written
 to a volume, so nothing survives a restart — by design.
