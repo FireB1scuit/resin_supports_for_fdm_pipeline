@@ -270,7 +270,361 @@ Useful flags for `supports`:
 - Detail detection cannot tell a sculpted face from a machined edge, so the
   "keep supports off the detail" scoring suits organic models, not brackets.
 
-## Development
+---
+
+# The maths
+
+Two questions get decided by arithmetic: **where should a support touch the
+model** (stage 2, `overhang.py` + `sampling.py`), and **what shape can be built
+under that point without the support itself needing support** (stage 3,
+`avoidance.py` + `supports.py` + `resin.py`). This section is what those modules
+are actually computing.
+
+Only two conventions are needed throughout:
+
+- **Angle below horizontal.** A face's angle below horizontal is `asin(-n_z)`
+  for unit normal `n`: `0°` for a vertical wall, `90°` for a flat downward face,
+  negative for anything facing up. This is the quantity `printable_overhang_deg`
+  caps.
+- **Severity.** `s = n · (-Z) = -n_z`, clipped to `0..1`. The cosine of the angle
+  between the face normal and straight down: `0` for a wall, `1` for a face
+  pointing straight down.
+
+---
+
+## Where contacts go
+
+### 1. Which faces are overhanging
+
+One dot product per face. A face is flagged when
+
+```
+s  >=  cos(overhang_angle)
+```
+
+At the default 45° that is `s >= 0.707` — the familiar slicer rule. Note the
+sign convention here is the opposite of a slicer's slider: a **larger** angle
+flags **more** faces, because it widens the cone of normals counted as
+"pointing downward".
+
+Faces sitting on the build plate are removed first — a face is on the plate if
+its *highest* vertex is within two layer heights of the model's lowest point.
+Without that, the underside of anything standing on a flat base is the most
+heavily supported surface on the model, and it is already touching the bed.
+
+### 2. Islands: cross-sections that start in mid-air
+
+An overhang angle cannot see a sword tip that begins 20 mm above the plate with
+nothing under it — that surface is not *steep*, it is *absent*. So the model is
+sliced into layers and each polygon is asked one question:
+
+```
+does this polygon intersect ANY polygon in the layer below?
+```
+
+If not, its first printed layer lands on air. Polygons under `island_min_area`
+(0.05 mm²) are discarded as slivers from a plane grazing a curved surface. The
+lookup against the layer below goes through an R-tree, so it is `O(k log n)`
+rather than every-polygon-against-every-polygon.
+
+Slicing dominates this stage, so there is a cost trick. Slicing at the true
+layer height on a 41 mm mini is 512 planes (~1.5 s); slicing at
+`4 × layer_height` is 128 planes (~0.4 s). The coarse pass runs, and then each
+island found is **bisected** back down to full precision: the bracket `[known
+empty, detected]` halves on every probe, so
+
+```
+error after k probes = 4·h / 2^k     →     k = 2 probes to get back to h
+```
+
+Two extra single-plane slices per island, and islands are rare. The one thing
+the coarse step genuinely gives up: a feature shorter in Z than 0.32 mm can fall
+between two planes — but a 0.3 mm tip could not hold it anyway.
+
+### 3. Blue-noise coverage of the overhang
+
+Candidates are drawn over the flagged faces with probability proportional to
+face area, so density is uniform per mm² rather than per triangle. How many:
+
+```
+N = 20 · (overhang area) / (tightest spacing)²        clamped to [512, 60000]
+```
+
+i.e. about 20 candidates for every point that will survive — enough that the
+thinning pass has real choices.
+
+Each candidate then gets its **own** minimum spacing, tightened as the overhang
+steepens. With `t` the severity rescaled so the overhang threshold is 0 and
+straight-down is 1:
+
+```
+t = clamp( (s − cos θ) / (1 − cos θ), 0, 1 )
+r = spacing · (1 − 0.5·t)
+```
+
+A face right on the threshold keeps the full 3 mm; a flat underside gets 1.5 mm.
+Halving the spacing means up to four times as many points per mm², which is what
+a flat underside needs — it sags far worse than a 50° slope.
+
+Thinning is **greedy Poisson-disk elimination**: build one KD-tree over all
+candidates, walk them in priority order, and each time one is accepted, kill
+every candidate inside its radius. One tree, no rebuilds. Priority is
+
+```
+priority = severity − 0.5 · detail
+```
+
+where `detail` is the normalised per-face detail-density metric. That term only
+ever decides **ordering** — where two candidates compete for the same spot, the
+one on the plain cloak beats the one on the sculpted face. It can never remove a
+support that is needed.
+
+Island contacts are fed in as pre-committed seeds: candidates within `r` of one
+are killed before the loop starts, so nothing crowds a mandatory point.
+
+### 4. Span fill: nothing left further than a tip can bridge
+
+A 0.3 mm tip cannot bridge, so after blue noise a **farthest-point insertion**
+runs. Keep an array `d` of each candidate's distance to the nearest existing
+support, then repeat:
+
+```
+i = argmax d
+stop if d[i] <= max_unsupported_span
+accept i,  then  d = min(d, ‖candidates − candidates[i]‖)
+```
+
+Updating `d` in place is `O(N)` per insertion with no tree rebuild, and the loop
+terminates with a guaranteed covering radius: nothing on the sampled surface is
+further than `max_unsupported_span` from a support. This pass runs against a
+*relaxed* mask (`1.25 × overhang_angle`), because a shallow face the strict mask
+skipped can still droop over a long unsupported run.
+
+### 5. Rejecting points nothing can be built under
+
+Two vetoes, both applied to candidates before they reach the thinning pass:
+
+- **Buried.** Probe one layer height below the surface and run a parity test —
+  count the surface crossings in the column *above* the probe; odd means inside
+  the mesh. Crossings at the same height are merged first, or a column running
+  exactly along a shared triangle edge counts one surface twice and flips the
+  answer.
+- **No room.** `clearance = z_point − z_of_highest_surface_below`, and the point
+  is dropped unless `clearance > tip_length`. Stage 3 could not fit a contact
+  cone in there.
+
+### The raycaster underneath all of this
+
+Every ray in this project points straight down, which is a much smaller problem
+than general raycasting. Triangles are projected to XY once and bucketed into a
+uniform grid; a query tests only the triangles in its own cell, using barycentric
+coordinates *in the projection*:
+
+```
+hit  ⟺  u >= 0,  v >= 0,  u + v <= 1
+z    =  a_z + u·(c_z − a_z) + v·(b_z − a_z)
+```
+
+An exactly vertical triangle projects to a line segment, its barycentric
+denominator collapses to zero, and it is dropped — correctly, since a vertical
+wall contributes no crossing to a vertical column.
+
+---
+
+## What gets built under them
+
+### The one inequality everything obeys
+
+Every part of a support is a surface of revolution: horizontal circles of radius
+`r(z)` whose centres drift sideways at slope `m` (mm horizontal per mm of height
+— a leaning strut). At azimuth `u` on such a surface the normal's vertical
+component is proportional to `−(m·u + r'(z))` while its horizontal magnitude is
+constant, so the steepest overhang anywhere on it is
+
+```
+angle_below_horizontal = atan( |m| + max(r', 0) )   ≤   printable_overhang_deg
+```
+
+That single line decides nearly every design choice in stage 3:
+
+- **A profile that narrows going up (`r' ≤ 0`) is always self-supporting**,
+  whatever else is happening. Hence the contact tip is wide at the bottom and
+  thin at the top, the base is a cone flaring *downward*, and the "spherical" tip
+  is a dome rather than a ball — a free-floating sphere's underside is a 90°
+  overhang.
+- **Leaning by `t` costs exactly `t` degrees** of the budget (`m = tan t`), so
+  every lean in the project is clamped to `strut_lean`, itself clamped to
+  `printable_overhang_deg − 2`.
+- **A flat downward face is a 90° overhang, always** — including one buried deep
+  inside another support. So a shaft is lofted as one continuous stack of rings
+  (base → join cone → shaft), not as three capped primitives stacked face to
+  face, and every buried cap is suppressed rather than left touching its
+  neighbour.
+
+Cross-links are the exception that proves it. A plain strut laid at angle `a`
+above horizontal has **side walls** overhanging by `90 − a` and **end caps**
+overhanging by `a`, so both are printable only inside the band
+
+```
+90 − printable  ≤  a  ≤  printable        →   40° ≤ a ≤ 50° at the defaults
+```
+
+which is why a link is placed at a *chosen* angle — pick the two attachment
+heights so the angle comes out right — rather than by connecting two convenient
+points. The shallowest angle in the band wins (42°, two degrees of margin):
+every degree shallower is more horizontal span for the same vertical run, and
+vertical run is the scarce thing on a short support.
+
+### Reachability: one sweep, two guarantees
+
+"Can a strut here get down to the plate?" is a question about the entire column
+of layers below it, so no local "is something directly beneath me" test can
+answer it. It is precomputed bottom-up instead, per layer and per radius:
+
+```
+free[r][i]   = bed  −  dilate( model_cross_section_i,  r + xy_clearance )
+reach[r][0]  = free[r][0]
+reach[r][i]  = free[r][i]  ∩  dilate( reach[r][i−1],  max_move )
+max_move     = collision_pitch · tan(strut_lean)
+```
+
+`dilate` is a Minkowski sum with a disc (shapely's `buffer`) — "grow this region
+outward by that much". `max_move` is simply how far a strut may travel sideways
+in one layer without exceeding its lean budget.
+
+Read the recursion as induction and `reach[r][i]` is *exactly* the set of XY
+positions on layer `i` from which a strut of radius `r` has a legal descent all
+the way to the plate: it is legal here, and one layer's travel takes it somewhere
+that was already provably legal below. Everything else falls out:
+
+- a position inside `reach` on the layer below drops straight down;
+- a position outside it moves to the nearest point of `reach` — which is what
+  makes a shaft step around an arm rather than stop dead at it;
+- a shaft lands on the model only when `reach` is genuinely empty beneath it, not
+  as a preference;
+- and since every position is inside `free` for its own radius, no support can
+  intersect the model at all.
+
+Both guarantees are structural, not a check-and-reject afterwards.
+
+Buffering every layer at every distinct radius would be ruinous, so collision is
+sampled at **6 radii spaced geometrically** from `tip_diameter/2` to
+`max_strut_diameter/2`, and a lookup rounds **up** — a strut judged against a
+radius thinner than its own could be routed into the model. This is CuraEngine's
+tree-support avoidance, descended from Vanek et al., *Clever Support* (2014).
+
+### From a contact point to a shaft
+
+**The tip axis.** A resin tip leaves the surface along its normal, so it meets
+the model at roughly a right angle and snaps off leaving a dot. But a tip is a
+small strut like any other and may not out-lean the printable limit:
+
+```
+axis = −n · tip_length                 (from the tip's base up to the contact)
+if axis_z ≤ 0:                         come straight up instead
+if ‖axis_xy‖ > axis_z · tan λ:         scale axis_xy down until equality holds
+```
+
+The last line keeps the *direction in plan* and steepens the climb — the tip
+still approaches from the right side, it just does so at a printable angle.
+
+**The elbow** is `contact − axis`: the joint where the tip's own run ends. Every
+measurement below is taken from there, never from the contact. The tip has
+already covered that horizontal step, and charging the arm a second vertical rise
+for the same distance is what used to push the shaft top below the build plate
+for contacts near the bed.
+
+**Arms and parenting.** An arm may lean at most `min(arm_angle, λ)` off vertical,
+so covering `d` horizontally costs
+
+```
+rise(d) = d / tan( min(arm_angle_deg, λ) )
+```
+
+A shaft feeding several arms must sit below all of them:
+
+```
+shaft_top(xy) = min over members of  ( elbow_z − rise(‖elbow_xy − xy‖) )
+```
+
+Clustering is therefore bounded by geometry, not taste. Contacts within
+`tip_length + parenting · support_spacing` of each other are candidates for one
+shaft, highest first, and a candidate only joins if the resulting `shaft_top`
+stays above zero — otherwise the shaft would have to start below the plate.
+Raising **parenting** widens that radius; it cannot buy a physically impossible
+arm.
+
+The shaft stands at the **mean of its members' elbow XYs**, then is *settled*: if
+that point is not standable, it moves to the nearest point of the reachable
+region, and is accepted only if the move is within `4 × max_move`. Further than
+that and the group is abandoned and each contact retried on its own — one awkward
+neighbour should not cost the rest their supports.
+
+Afterwards, shafts closer together than `1.5 × shaft_lower_diameter` are folded
+into one. Two shafts half a millimetre apart are one shaft with extra steps:
+double the feet to snap off, and no distance for a cross-link to span. An arm is
+handed to the survivor only if it can still meet its contact at a printable angle
+from over there.
+
+**Descent.** Scan layers downward from the shaft top until `free` fails. If it
+never does, the shaft lands at `z = 0`. If it does, take the last clear height,
+ask the raycaster for the highest surface strictly below it, and land there — on
+the model, which is why that case ends in a tip too and gets reported in the log.
+
+### Cross-links
+
+For each shaft, neighbours within `brace_max_span`, nearest first, at most 3
+links each. With the link angle `a` fixed at 42°:
+
+```
+rise   = span · tan a
+window = [ max(land_z of both) + foot_height/2 ,  min(top_z of both) ]
+```
+
+The pair is linked only if the window is at least `rise` tall — a short support
+on a low overhang simply has no vertical run to spend, and gets no link. Where
+there is room, links repeat every `brace_interval` up to 6 rungs, so a tall shaft
+gets a ladder. Each candidate link is tested against the model by sampling 10
+interior points along it; both ends are left uncapped, since they are buried
+inside the shafts and a cap there is a 90° overhang in the middle of solid
+plastic.
+
+### Profiles that can never need support
+
+| Part | Profile `(z, r)` | Why it is safe |
+|---|---|---|
+| Base | `(z0, r_foot) → (z0+h, r_shaft)` | cone flaring downward, `r' < 0` |
+| Shaft | `(bottom, r_lower) → (top, r_upper)` | slight upward taper, `r' < 0` |
+| Conical tip | `(base_r) → (contact, r_tip) → (contact+pen, r_tip)` | narrows upward, then sunk `tip_penetration` into the model |
+| Spherical tip | `(z_eq + R·sin φ, R·cos φ)` for `φ = 30°, 55°, 75°, 85°` | only the **upper** hemisphere is emitted; the lower half is replaced by the taper running up to the equator |
+| Strut / arm / link | constant `r`, centre drifting at `m = tan(tilt)` | sheared, not rotated, so end caps stay horizontal — a rotated cap would overhang by `90 − tilt` |
+
+### Where the numbers come from
+
+Nothing in the geometry code contains a millimetre value. Every dimension is
+derived from the nozzle:
+
+```
+tip             = clamp(1.5 · nozzle, 0.25, 0.6)
+shaft           = clamp(6.0 · nozzle, 1.0, 2.0)
+link            = clamp(4.0 · nozzle, 2 · nozzle, 0.8 · shaft)
+tip_length      = max(1.0, shaft)
+tip_penetration = max(0.05, 1.25 · layer_height)
+foot ø          = max(4.0, 4 · shaft)
+max span        = max(4.0, 4 · shaft)
+xy_clearance    = max(0.3, 2 · nozzle)
+collision pitch = max(0.4, 6 · layer_height)
+support layer   = 2 · layer_height
+```
+
+The 1.5 on the tip is "at least about one and a half extrusion widths, or the
+printer cannot lay it down at all"; the 6.0 on the shaft is what puts a 0.2 mm
+nozzle on the 1.2 mm shaft the Resin2FDM documentation recommends. Change the
+nozzle and the whole support system rescales coherently.
+
+---
+
+# Development
 
 See [CLAUDE.md](CLAUDE.md) for the module map, the git rules and the invariants.
 The full design is in [docs/PLAN.md](docs/PLAN.md).
