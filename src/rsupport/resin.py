@@ -13,8 +13,10 @@ discrete components, and it keeps its shape all the way down::
 * **arm** — the short angled link from the shaft up to the tip. Several arms
   can fan off one shaft; that is how resin slicers keep the shaft count down
   (Lychee calls it parenting, or "optimize supports").
-* **shaft** — straight and vertical, ``shaft_upper_diameter`` at the top and
-  ``shaft_lower_diameter`` at the bottom. A slight taper, not a trunk.
+* **shaft** — ``shaft_upper_diameter`` at the top and ``shaft_lower_diameter``
+  at the bottom. A slight taper, not a trunk. Straight and vertical whenever it
+  can be, which is nearly always; where the model is in the way it leans around
+  it instead of stopping on it (:func:`_route_to_plate`).
 * **base** — the footprint on the plate: a disc of ``foot_diameter``, then a
   flare in to the shaft. On a lifted model the discs of neighbouring supports
   overlap into what amounts to a raft.
@@ -34,10 +36,27 @@ diagonal inside the printable band. Same job, same lattice, an angle the nozzle
 can actually lay down. Adapting exactly this kind of thing is the whole point
 of the project.
 
+Getting down there
+------------------
 Collision and reachability come from :class:`rsupport.avoidance.AvoidanceField`,
-which is independent of what gets built on top of it: a shaft may never pass
-through the model, and only rests on the model when the plate is genuinely
-unreachable.
+which is independent of what gets built on top of it. Three things follow from
+it, and they are the whole of how a support decides where to go:
+
+1. **A shaft routes around the model rather than into or onto it.**
+   :func:`_route_to_plate` walks the field's reachability maps down layer by
+   layer, staying put where the layer below still allows it and sliding to the
+   nearest place that does where it does not. Nothing directly below a contact
+   is a reason to give up, only a reason to lean.
+2. **Arms and cross-links are checked too.** They are placed by geometry rather
+   than routed through the field, so :func:`_strut_clear` asks about each one.
+   A shaft has never been the only thing that could cross a sculpt: an arm that
+   leaves a shaft standing on the wrong side of the model is a spear straight
+   through it.
+3. **The plate is the only landing, by default.** ``params.plate_only`` is on,
+   so a contact with no route down is refused and reported rather than propped
+   off the sculpt. Turning it off allows the last-resort landing in
+   :func:`_drop_shaft` — a shaft that stops where it is, tip first. Supports
+   that *start* on the model are not implemented.
 """
 
 from __future__ import annotations
@@ -54,7 +73,15 @@ from shapely.ops import nearest_points
 from .avoidance import AvoidanceField, strut_lean
 from .mesh_io import concat
 from .raycast import DownRay
-from .supports import LineXY, foot_profile, make_strut, mesh_rings, rings_on_axis, tip_profile
+from .supports import (
+    LineXY,
+    PathXY,
+    foot_profile,
+    make_strut,
+    mesh_rings,
+    rings_on_axis,
+    tip_profile,
+)
 from .types import SupportBuild, SupportParams, SupportPoint
 
 __all__ = ["build_resin", "Shaft", "Arm"]
@@ -78,17 +105,55 @@ class Arm:
 
 @dataclass
 class Shaft:
-    """One vertical strut, its arms, and where it stands."""
+    """One strut, its arms, and where it stands.
 
-    xy: np.ndarray
-    top_z: float
-    land_z: float
+    ``path`` is the axis, bottom to top, as ``(x, y, z)`` rows. A shaft with a
+    clear column below it is two rows and runs dead straight, which is what an
+    SLA shaft normally does. Where the model is in the way the path picks up a
+    row per collision layer and steps around it instead — see
+    :func:`_route_to_plate`.
+    """
+
+    path: np.ndarray
     on_model: bool
     arms: list[Arm] = dc_field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        pts = np.atleast_2d(np.asarray(self.path, dtype=np.float64))
+        self.path = pts[np.argsort(pts[:, 2], kind="stable")]
+
+    @property
+    def xy(self) -> np.ndarray:
+        """Where the shaft *tops out*. Arms leave from here."""
+        return self.path[-1, :2]
+
+    @property
+    def base_xy(self) -> np.ndarray:
+        """Where it stands. Not the same place once it has routed around."""
+        return self.path[0, :2]
+
+    @property
+    def top_z(self) -> float:
+        return float(self.path[-1, 2])
+
+    @property
+    def land_z(self) -> float:
+        return float(self.path[0, 2])
 
     @property
     def height(self) -> float:
         return max(0.0, self.top_z - self.land_z)
+
+    @property
+    def detours(self) -> int:
+        """How many times the axis actually stepped sideways."""
+        if len(self.path) < 2:
+            return 0
+        step = np.linalg.norm(np.diff(self.path[:, :2], axis=0), axis=1)
+        return int((step > 1e-9).sum())
+
+    def xy_at(self, z: float) -> np.ndarray:
+        return PathXY(self.path)(z)
 
 
 # --------------------------------------------------------------------------- #
@@ -117,7 +182,7 @@ def build_resin(
 
     parts: list[trimesh.Trimesh] = []
     for shaft in shafts:
-        parts.extend(_shaft_meshes(shaft, params))
+        parts.extend(_shaft_meshes(shaft, field, params))
 
     links, n_links = _link_shafts(field, ray, shafts, params)
     parts.extend(links)
@@ -139,7 +204,60 @@ def build_resin(
     )
 
 
-def _elbow(pt: SupportPoint, params: SupportParams) -> np.ndarray:
+def _strut_clear(
+    field: AvoidanceField,
+    ray: DownRay,
+    a,
+    b,
+    radius: float,
+    params: SupportParams,
+) -> bool:
+    """Does a strut from `a` to `b` stay out of the model?
+
+    Shafts get this for free — they are routed through the avoidance field, so
+    they cannot be anywhere else. Arms and cross-links are placed by geometry
+    rather than by the field, so they have to be asked, and until they were the
+    scaffold's one hard guarantee had a hole in it big enough to run a 26 mm
+    strut through the middle of a sculpt.
+
+    Two tests, because they catch different things. The parity test is the
+    guarantee: nowhere on the strut may be *inside* the model, full stop. The
+    field test is the manners: keep ``xy_clearance`` off the surface as well, so
+    a strut does not graze what it passes. The top ``tip_length`` of the run is
+    exempt from the second one only — that end is on its way to touch the
+    model, and being close to it there is the entire point.
+    """
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    span = float(np.linalg.norm(b - a))
+    if span <= _EPS:
+        return True
+
+    n = int(np.clip(math.ceil(span / max(field.pitch * 0.5, 1e-3)), 4, 64))
+    t = np.linspace(0.0, 1.0, n + 2)[1:-1]  # endpoints touch by design
+    pts = a + (b - a) * t[:, None]
+
+    if bool(ray.inside(pts).any()):
+        return False
+
+    graze_from = max(a[2], b[2]) - params.tip_length
+    probe = pts[pts[:, 2] <= graze_from]
+    if not len(probe):
+        return True
+
+    bucket = field.bucket(radius)
+    layers = np.array([field.layer_of(z) for z in probe[:, 2]])
+    for layer in np.unique(layers):
+        sel = probe[layers == layer]
+        region = field.free(bucket, int(layer))
+        if region is None or region.is_empty:
+            return False
+        if not bool(shapely.contains_xy(region, sel[:, 0], sel[:, 1]).all()):
+            return False
+    return True
+
+
+def _elbow(pt: SupportPoint, params: SupportParams, ray: DownRay | None = None):
     """The joint between tip and arm, where the tip's own run ends.
 
     A resin tip leaves the surface roughly perpendicular, so on a downward
@@ -150,9 +268,53 @@ def _elbow(pt: SupportPoint, params: SupportParams) -> np.ndarray:
     already covered that horizontal step, and charging the arm a vertical rise
     for the same distance is what made contacts near the plate impossible to
     support: their shaft top came out below the build plate.
+
+    Given a `ray`, the tip is also *aimed*: the natural direction is tried
+    first, and if the model is in the way of it the tip is swung around the
+    contact — steeper, then off to either side — until it finds a line that is
+    clear. That is the cheap half of relocating an awkward contact, and it is
+    the half that keeps the contact exactly where sampling put it. Returns None
+    when every direction is blocked, which makes the point genuinely
+    unsupportable from below and it is dropped.
     """
     contact = np.asarray(pt.position, dtype=np.float64)
-    return contact - _tip_axis(np.asarray(pt.normal, dtype=np.float64), params)
+    normal = np.asarray(pt.normal, dtype=np.float64)
+    if ray is None:
+        return contact - _tip_axis(normal, params)
+
+    for axis in _tip_candidates(normal, params):
+        elbow = contact - axis
+        if elbow[2] <= 0.0:
+            continue
+        if not ray.segment_blocked([elbow], [contact])[0]:
+            return elbow
+    return None
+
+
+def _tip_candidates(normal: np.ndarray, params: SupportParams):
+    """Tip directions to try, best first.
+
+    The surface normal is what a resin slicer would use and is always first.
+    The rest lean the tip progressively further away from it — up towards
+    vertical, then rotated around the contact — which is what gets a tip in
+    under a lip that its own normal points straight into.
+    """
+    yield _tip_axis(normal, params)
+
+    n = np.asarray(normal, dtype=np.float64)
+    flat = np.array([-n[0], -n[1], 0.0])
+    norm = float(np.linalg.norm(flat))
+    if norm > 1e-9:
+        flat /= norm
+        for deg in (30.0, 60.0, -30.0, -60.0):
+            rad = math.radians(deg)
+            c, s = math.cos(rad), math.sin(rad)
+            turned = np.array([flat[0] * c - flat[1] * s, flat[0] * s + flat[1] * c, 0.0])
+            yield _tip_axis(-np.array([turned[0], turned[1], -0.35]), params)
+
+    # Straight up: nothing else to try, and on a downward overhang it is the
+    # direction the arm would rather have anyway.
+    yield np.array([0.0, 0.0, params.tip_length])
 
 
 def _plan_shafts(field: AvoidanceField, ray: DownRay, points, params: SupportParams):
@@ -160,7 +322,22 @@ def _plan_shafts(field: AvoidanceField, ray: DownRay, points, params: SupportPar
     warnings: list[str] = []
     dropped: list[SupportPoint] = []
 
-    elbows = np.array([_elbow(p, params) for p in points])
+    kept, elbow_list = [], []
+    for pt in points:
+        elbow = _elbow(pt, params, ray)
+        if elbow is None:
+            dropped.append(pt)
+            continue
+        kept.append(pt)
+        elbow_list.append(elbow)
+    n_unreachable = len(dropped)
+
+    if not kept:
+        warnings.append(f"{len(dropped)} contact point(s) could not be reached by a tip")
+        return [], dropped, warnings
+
+    points = kept
+    elbows = np.asarray(elbow_list, dtype=np.float64)
     groups = _group_contacts(elbows, points, params)
 
     shafts: list[Shaft] = []
@@ -178,14 +355,31 @@ def _plan_shafts(field: AvoidanceField, ray: DownRay, points, params: SupportPar
         else:
             shafts.append(shaft)
 
-    shafts = _absorb_neighbours(shafts, params)
+    shafts = _absorb_neighbours(field, ray, shafts, params)
 
-    if dropped:
-        warnings.append(f"{len(dropped)} contact point(s) had nowhere to stand a shaft")
+    n_stranded = len(dropped) - n_unreachable
+    if n_unreachable:
+        warnings.append(
+            f"{n_unreachable} contact point(s) could not be reached by a tip from any direction"
+        )
+    if n_stranded:
+        detail = (
+            "no collision-free route to the plate"
+            if params.plate_only
+            else "nowhere to stand a shaft"
+        )
+        warnings.append(f"{n_stranded} contact point(s) left unsupported: {detail}")
+    if params.plate_only and n_stranded:
+        warnings.append(
+            "supports are restricted to the build plate; starting them on the model "
+            "is not implemented yet"
+        )
     return shafts, dropped, warnings
 
 
-def _absorb_neighbours(shafts: list[Shaft], params: SupportParams) -> list[Shaft]:
+def _absorb_neighbours(
+    field: AvoidanceField, ray: DownRay, shafts: list[Shaft], params: SupportParams
+) -> list[Shaft]:
     """Fold shafts that are practically touching into one.
 
     Grouping happens per contact, so two contacts that could not share a shaft
@@ -195,15 +389,25 @@ def _absorb_neighbours(shafts: list[Shaft], params: SupportParams) -> list[Shaft
     and — because a cross-link needs real distance to span — they leave nothing
     for the scaffold to brace against.
 
-    An arm is only handed over if it can still meet its contact at a printable
-    angle from the surviving shaft.
+    Neighbours are neighbours *in three dimensions*. Looking only at where two
+    shafts stand is what let a 2 mm stub holding up a lifted model's underside
+    adopt the arms of a contact 25 mm above it: the two tops are nowhere near
+    each other, the arm ends up leaving the host at the host's top rather than
+    at the height it asked for, and what gets built is a 25 mm near-vertical
+    spear straight through the sculpt. So an arm only moves if it still leaves
+    the host at close to its intended height, and only if the strut it would
+    become is clear of the model.
     """
     if len(shafts) < 2:
         return shafts
 
     reach = params.shaft_lower_diameter * 1.5
+    # Match on where the shafts *top out*, not on where they stand: that is
+    # where the arms leave from, and once shafts route around the model the two
+    # can be centimetres apart.
     pos = np.array([s.xy for s in shafts])
     kdt = cKDTree(pos)
+    r_arm = params.arm_diameter * 0.5
 
     # Tallest and most-loaded first: those are the ones worth keeping.
     order = sorted(range(len(shafts)), key=lambda i: (-len(shafts[i].arms), -shafts[i].height))
@@ -222,19 +426,25 @@ def _absorb_neighbours(shafts: list[Shaft], params: SupportParams) -> list[Shaft
             # Never trade a plate landing for a model one.
             if other.on_model != host.on_model and not other.on_model:
                 continue
+            # Tops too far apart in Z: these are not the same shaft seen twice,
+            # and pretending otherwise is what builds the spear.
+            if abs(other.top_z - host.top_z) > params.tip_length:
+                continue
             moved = []
             for arm in other.arms:
                 d = float(np.linalg.norm(arm.elbow[:2] - host.xy))
                 attach_z = arm.elbow[2] - _arm_rise(d, params)
                 if attach_z < host.land_z + params.layer_height:
                     break  # this arm cannot reach from over here
+                # It leaves at the shaft top when the shaft tops out below the
+                # height it wanted. Bounded, or the arm stops being an arm.
+                if attach_z - host.top_z > params.tip_length:
+                    break
+                attach = np.array([host.xy[0], host.xy[1], min(attach_z, host.top_z)])
+                if not _strut_clear(field, ray, attach, arm.elbow, r_arm, params):
+                    break
                 moved.append(
-                    Arm(
-                        contact=arm.contact,
-                        normal=arm.normal,
-                        attach=np.array([host.xy[0], host.xy[1], min(attach_z, host.top_z)]),
-                        elbow=arm.elbow,
-                    )
+                    Arm(contact=arm.contact, normal=arm.normal, attach=attach, elbow=arm.elbow)
                 )
             else:
                 host.arms.extend(moved)
@@ -313,43 +523,86 @@ def _shaft_top_for(xy: np.ndarray, elbows: np.ndarray, params: SupportParams) ->
 
 
 def _make_shaft(field: AvoidanceField, ray: DownRay, members, elbows, params: SupportParams):
-    """Place one shaft under a group of contacts, or return None."""
+    """Place one shaft under a group of contacts, or return None.
+
+    The plate is tried first and properly: :func:`_route_to_plate` will lean the
+    shaft around anything in the way rather than give up at the first
+    obstruction. Only when there is genuinely no route down — and only when
+    ``params.plate_only`` is off — does the shaft fall back to standing on the
+    model.
+    """
     elbows = np.atleast_2d(np.asarray(elbows, dtype=np.float64))
-    xy = elbows[:, :2].mean(axis=0)
-    top_z = _shaft_top_for(xy, elbows, params)
-    # A contact barely clear of the plate still gets a support: the base cone
-    # simply runs straight into the tip with no shaft in between. Only refuse
-    # when the arm would have to start below the plate.
-    if top_z <= 0.0:
+    start = elbows[:, :2].mean(axis=0)
+    if _shaft_top_for(start, elbows, params) <= 0.0:
+        # A contact barely clear of the plate still gets a support: the base
+        # cone simply runs straight into the tip with no shaft in between. Only
+        # refuse when the arm would have to start below the plate.
         return None
 
     bucket = field.bucket(params.shaft_lower_diameter * 0.5)
-    xy = _settle(field, xy, top_z, bucket)
-    if xy is None:
-        return None
+    modes = (True,) if params.plate_only else (True, False)
 
-    top_z = _shaft_top_for(xy, elbows, params)
-    if top_z <= 0.0:
-        return None
+    for to_plate in modes:
+        xy = _settle(field, start, _shaft_top_for(start, elbows, params), bucket, to_plate)
+        if xy is None:
+            continue
+        top_z = _shaft_top_for(xy, elbows, params)
+        if top_z <= 0.0:
+            continue
 
-    land_z, on_model, top_z = _drop_shaft(field, ray, xy, top_z, bucket, params)
-    if top_z - land_z <= 0.0:
-        return None
+        if to_plate:
+            path = _route_to_plate(field, xy, top_z, bucket)
+            if path is None:
+                continue
+            on_model = False
+        else:
+            land_z, on_model, top_z = _drop_shaft(field, ray, xy, top_z, bucket, params)
+            if top_z - land_z <= 0.0:
+                continue
+            path = np.array([[xy[0], xy[1], land_z], [xy[0], xy[1], top_z]])
 
-    shaft = Shaft(xy=xy, top_z=top_z, land_z=land_z, on_model=on_model)
+        shaft = Shaft(path=path, on_model=on_model)
+        arms = _fit_arms(field, ray, shaft, members, elbows, params)
+        if arms is None:
+            continue
+        shaft.arms = arms
+        return shaft
+    return None
+
+
+def _fit_arms(
+    field: AvoidanceField,
+    ray: DownRay,
+    shaft: Shaft,
+    members,
+    elbows: np.ndarray,
+    params: SupportParams,
+):
+    """Hang every contact in the group off this shaft, or give up on the group.
+
+    All-or-nothing on purpose: the caller retries the members one at a time, and
+    a contact on a shaft of its own is a better support than a contact on an arm
+    that has to cross the sculpt to reach it.
+    """
+    xy, top_z, land_z = shaft.xy, shaft.top_z, shaft.land_z
+    r_arm = params.arm_diameter * 0.5
+    arms: list[Arm] = []
     for pt, elbow in zip(members, elbows):
         elbow = np.asarray(elbow, dtype=np.float64)
         d = float(np.linalg.norm(elbow[:2] - xy))
         attach_z = min(top_z, elbow[2] - _arm_rise(d, params))
-        shaft.arms.append(
+        attach = np.array([xy[0], xy[1], max(attach_z, land_z)])
+        if not _strut_clear(field, ray, attach, elbow, r_arm, params):
+            return None
+        arms.append(
             Arm(
                 contact=np.asarray(pt.position, dtype=np.float64),
                 normal=np.asarray(pt.normal, dtype=np.float64),
-                attach=np.array([xy[0], xy[1], max(attach_z, land_z)]),
+                attach=attach,
                 elbow=elbow,
             )
         )
-    return shaft
+    return arms
 
 
 def _tip_axis(normal: np.ndarray, params: SupportParams) -> np.ndarray:
@@ -381,28 +634,115 @@ def _tip_axis(normal: np.ndarray, params: SupportParams) -> np.ndarray:
     return axis
 
 
-def _settle(field: AvoidanceField, xy, z: float, bucket: int):
-    """Nudge a shaft position onto standable ground at this height."""
+def _settle(field: AvoidanceField, xy, z: float, bucket: int, to_plate: bool = True):
+    """Nudge a shaft top onto ground it may stand on at this height.
+
+    With `to_plate` the ground is the *reachable* set, so settling here is what
+    establishes :func:`_route_to_plate`'s precondition; without it, merely the
+    collision-free set, which is all a shaft that will end up on the model
+    needs.
+    """
     layer = field.layer_of(z)
-    for to_plate in (True, False):
-        region = field.standable(bucket, layer, to_plate)
-        if region is None or region.is_empty:
-            continue
-        if field.contains(region, xy):
-            return np.asarray(xy, dtype=np.float64)
-        q = nearest_points(region, shapely.Point(float(xy[0]), float(xy[1])))[0]
-        moved = np.array([q.x, q.y])
-        if float(np.linalg.norm(moved - xy)) <= field.max_move * 4.0:
-            return moved
+    region = field.standable(bucket, layer, to_plate)
+    if region is None or region.is_empty:
+        return None
+    if field.contains(region, xy):
+        return np.asarray(xy, dtype=np.float64)
+    q = nearest_points(region, shapely.Point(float(xy[0]), float(xy[1])))[0]
+    moved = np.array([q.x, q.y])
+    if float(np.linalg.norm(moved - xy)) <= field.max_move * 4.0:
+        return moved
     return None
 
 
-def _drop_shaft(field: AvoidanceField, ray: DownRay, xy, top_z, bucket, params: SupportParams):
-    """Take a vertical shaft down as far as it can go.
+def _route_to_plate(field: AvoidanceField, xy, top_z: float, bucket: int):
+    """Walk a shaft down to the plate, stepping around the model on the way.
 
-    Straight down, because that is what an SLA shaft does. The plate is used
-    whenever it is reachable; the shaft only stops on the model when the free
-    space runs out beneath it.
+    A shaft that finds clear air below it drops dead straight, which is what an
+    SLA shaft does and what nearly all of them do here. This is the other case:
+    something is in the way, and rather than stopping on it, the shaft leans
+    around it.
+
+    The route is read straight out of the reachability sweep. ``reach[i]`` is
+    every position on layer ``i`` from which the plate is still gettable without
+    entering the model, and it is built as
+    ``free[i] ∩ reach[i-1].buffer(max_move)`` — so a position inside ``reach[i]``
+    is guaranteed to have a position inside ``reach[i-1]`` within one layer's
+    sideways travel of it. Descending is then just: stay put if the layer below
+    still allows it, otherwise slide to the nearest place that does.
+
+    That guarantee is why this cannot paint itself into a corner and why it
+    needs no search, no backtracking and no heuristic. The precondition is the
+    whole of it: the starting position must already be inside ``reach`` at the
+    top, which is what :func:`_settle` establishes.
+
+    Returns the axis bottom-to-top as an (N, 3) array, or None if the start was
+    not reachable after all.
+    """
+    top_layer = field.layer_of(top_z)
+    # `layer_of` rounds, so it can land a hair above the top. Never start the
+    # descent above the shaft's own top: the first row is the top itself.
+    while top_layer > 0 and field.heights[top_layer] > top_z:
+        top_layer -= 1
+
+    cur = np.asarray(xy, dtype=np.float64)
+    if not field.contains(field.reach(bucket, top_layer), cur):
+        return None
+
+    # Simplifying the buffered region can nudge its boundary out by up to the
+    # simplify tolerance, so the nearest reachable point can sit a whisker
+    # beyond one layer's travel. Allow for that and no more.
+    slack = field.max_move + max(field.params.nozzle_diameter * 0.25, 1e-3)
+
+    rows = [(cur[0], cur[1], float(top_z))]
+    for layer in range(top_layer - 1, -1, -1):
+        region = field.reach(bucket, layer)
+        if region is None or region.is_empty:
+            return None
+        if not field.contains(region, cur):
+            q = nearest_points(region, shapely.Point(float(cur[0]), float(cur[1])))[0]
+            moved = np.array([q.x, q.y])
+            if float(np.linalg.norm(moved - cur)) > slack:
+                return None
+            cur = moved
+        rows.append((cur[0], cur[1], float(field.heights[layer])))
+
+    rows.reverse()
+    return _simplify_path(np.asarray(rows, dtype=np.float64))
+
+
+def _simplify_path(path: np.ndarray) -> np.ndarray:
+    """Drop rows that only repeat the previous XY.
+
+    The sweep produces one row per collision layer, and on a shaft that never
+    has to dodge anything that is dozens of identical rows — dozens of rings to
+    loft for a strut that is a straight cylinder. Collinear runs collapse to
+    their endpoints; a genuine step keeps both of its.
+    """
+    if len(path) < 3:
+        return path
+    keep = [0]
+    for i in range(1, len(path) - 1):
+        a, b, c = path[keep[-1]], path[i], path[i + 1]
+        dz_ab, dz_bc = b[2] - a[2], c[2] - b[2]
+        if dz_ab <= _EPS or dz_bc <= _EPS:
+            keep.append(i)
+            continue
+        # Where would the straight line a->c be at b's height?
+        t = (b[2] - a[2]) / (c[2] - a[2])
+        want = a[:2] + (c[:2] - a[:2]) * t
+        if float(np.linalg.norm(b[:2] - want)) > 1e-9:
+            keep.append(i)
+    keep.append(len(path) - 1)
+    return path[keep]
+
+
+def _drop_shaft(field: AvoidanceField, ray: DownRay, xy, top_z, bucket, params: SupportParams):
+    """Take a vertical shaft straight down until something stops it.
+
+    The fallback for when the plate is genuinely unreachable and
+    ``params.plate_only`` is off: no routing, no leaning, just stand on whatever
+    is directly underneath. Reaching the plate is :func:`_route_to_plate`'s job.
     """
     top_layer = field.layer_of(top_z)
     plate_eps = max(1e-6, params.layer_height * 0.5)
@@ -489,9 +829,12 @@ def _link_shafts(field: AvoidanceField, ray: DownRay, shafts: list[Shaft], param
             n = 0
             z = lo + rise * 0.5
             while z + rise <= hi and n < 6:
-                p0 = np.array([a.xy[0], a.xy[1], z])
-                p1 = np.array([b.xy[0], b.xy[1], z + rise])
-                if not ray.segment_blocked([p0], [p1])[0]:
+                ends = _link_ends(a, b, z, tan_a, hi)
+                if ends is None:
+                    z += interval
+                    continue
+                p0, p1 = ends
+                if _strut_clear(field, ray, p0, p1, params.brace_diameter * 0.5, params):
                     linked_here += 1
                     # Both ends sit on the shaft axes, so they are buried
                     # inside the shafts. Capping them would put a flat
@@ -510,6 +853,29 @@ def _link_shafts(field: AvoidanceField, ray: DownRay, shafts: list[Shaft], param
                     n += 1
                 z += interval
     return parts, len(made)
+
+
+def _link_ends(a: Shaft, b: Shaft, z: float, tan_a: float, hi: float):
+    """Both ends of one cross-link, at the angle the printable band allows.
+
+    A straight shaft is in the same place at every height, so its end of a link
+    is wherever it stands. A *routed* shaft is not: its axis has moved by the
+    time the link meets it, so the horizontal span — and therefore the vertical
+    run that keeps the link at ``angle`` — depends on the very heights being
+    solved for. Both shafts lean by at most one ``max_move`` per layer, so the
+    dependence is weak and a couple of passes settle it.
+    """
+    p0 = np.append(a.xy_at(z), z)
+    z1 = z
+    for _ in range(3):
+        span = float(np.linalg.norm(b.xy_at(z1) - p0[:2]))
+        z1 = z + span * tan_a
+        if z1 > hi:
+            return None
+    p1 = np.append(b.xy_at(z1), z1)
+    if z1 - z <= _EPS:
+        return None
+    return p0, p1
 
 
 def _link_angle(params: SupportParams) -> float | None:
@@ -534,12 +900,72 @@ def _link_angle(params: SupportParams) -> float | None:
 # --------------------------------------------------------------------------- #
 
 
-def _shaft_meshes(shaft: Shaft, params: SupportParams) -> list[trimesh.Trimesh]:
+def _foot_radius(
+    shaft: Shaft, foot_h: float, field: AvoidanceField, params: SupportParams
+) -> float:
+    """The base disc, shrunk to whatever fits beside the model.
+
+    A base is much fatter than the shaft it sits under — 5 mm against 1.2 mm —
+    and until shafts routed around obstacles it was never in a position where
+    that mattered: a blocked shaft stood on the model, so a shaft that reached
+    the plate had reached it down a clear column. A routed shaft comes down
+    *beside* whatever it stepped around, hard against the clearance boundary,
+    and a full-width disc there reaches straight back into the sculpt.
+
+    Overlap at the plate itself is fine and deliberate — the model's own
+    footprint and the feet are all printed flat on glass, and neighbouring feet
+    are supposed to merge into a raft. Overlap with a wall standing 10 mm tall
+    is not: that fuses the support to the sculpt. So the disc keeps its full
+    width wherever there is room, and gives up only as much as it must.
+    """
+    want = params.foot_diameter * 0.5
+    floor = params.shaft_lower_diameter * 0.5
+    if foot_h <= _EPS or want <= floor:
+        return want
+
+    # Every layer the disc actually occupies, not just the one it stands on.
+    top = field.layer_of(shaft.land_z + foot_h)
+    room = min(
+        field.room(shaft.xy_at(field.heights[i]), i)
+        for i in range(field.layer_of(shaft.land_z), max(top, 0) + 1)
+    )
+    return float(np.clip(room, floor, want))
+
+
+def _rings_at_every_bend(profile, axis: PathXY):
+    """Add a ring at each bend in the axis, keeping the profile's own radii.
+
+    A loft only knows where its axis is at the heights it is given a ring for.
+    Give it two — bottom and top — and it draws a straight cylinder between
+    them, which on a shaft that bends around the model is a cylinder straight
+    *through* the model. So every vertex of the route gets a ring, at whatever
+    radius the profile has at that height.
+    """
+    prof = sorted((float(z), float(r)) for z, r in profile)
+    zs = [z for z, _ in prof]
+    rs = [r for _, r in prof]
+    lo, hi = zs[0], zs[-1]
+
+    extra = [float(z) for z in axis.heights() if lo + _EPS < z < hi - _EPS]
+    if not extra:
+        return prof
+
+    merged = sorted(set(zs) | set(extra))
+    # np.interp needs strictly increasing x; the profile can repeat a height
+    # (the foot's disc-to-flare corner), and there the *lower* radius is the
+    # one a bend between them should take, so the corner is nudged apart.
+    xs = np.asarray(zs, dtype=np.float64)
+    xs = np.maximum.accumulate(xs + np.arange(len(xs)) * 1e-12)
+    return [(z, float(np.interp(z, xs, rs))) for z in merged]
+
+
+def _shaft_meshes(
+    shaft: Shaft, field: AvoidanceField, params: SupportParams
+) -> list[trimesh.Trimesh]:
     """Base, join cone, shaft, arms and tips for one support."""
     out: list[trimesh.Trimesh] = []
     r_low = params.shaft_lower_diameter * 0.5
     r_up = params.shaft_upper_diameter * 0.5
-    x, y = float(shaft.xy[0]), float(shaft.xy[1])
 
     # Base, flare and shaft as one continuous stack of rings rather than three
     # stacked primitives. Stacking leaves the base's top cap and the shaft's
@@ -552,18 +978,19 @@ def _shaft_meshes(shaft: Shaft, params: SupportParams) -> list[trimesh.Trimesh]:
         tip_len = min(params.tip_length, max(shaft.height * 0.4, params.layer_height))
         profile = [(z0, params.tip_diameter * 0.5), (z0 + tip_len, r_low)]
     else:
-        z0 = 0.0
+        z0 = shaft.land_z
         # A support shorter than the base is not a reason to skip the base —
         # that support needs the adhesion most — but the base may not grow out
         # of the top of the shaft it is supposed to sit under, so it is squashed
         # into whatever height there is.
-        foot_h = min(params.foot_height, max(0.0, shaft.top_z - params.layer_height))
-        profile = list(foot_profile(0.0, foot_h, params.foot_diameter * 0.5, r_low))
+        foot_h = min(params.foot_height, max(0.0, shaft.top_z - z0 - params.layer_height))
+        profile = list(foot_profile(z0, foot_h, _foot_radius(shaft, foot_h, field, params), r_low))
 
     if shaft.top_z > profile[-1][0] + _EPS:
         profile.append((float(shaft.top_z), r_up))
 
-    axis = LineXY([x, y, z0], [x, y, float(shaft.top_z)])
+    axis = PathXY(np.vstack([[*shaft.base_xy, z0], shaft.path]))
+    profile = _rings_at_every_bend(profile, axis)
     out.append(mesh_rings(rings_on_axis(axis, profile), params.ring_sections))
 
     for arm in shaft.arms:

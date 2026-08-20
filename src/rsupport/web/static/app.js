@@ -186,6 +186,7 @@ function overrides() {
     overhang_angle_deg: +$('overhang').value,
     tip_style: $('tipstyle').value,
     brace_enabled: $('braces').checked,
+    plate_only: $('plateonly').checked,
     strut_lean_deg: +$('lean').value,
     parenting: +$('parenting').value,
     lift_height: +$('lift').value,
@@ -204,6 +205,7 @@ function syncSliders(p) {
   }
   $('tipstyle').value = p.tip_style;
   $('braces').checked = p.brace_enabled;
+  if (p.plate_only != null) $('plateonly').checked = p.plate_only;
   if (p.strut_lean_deg != null) $('lean').value = p.strut_lean_deg;
   if (p.parenting != null) $('parenting').value = p.parenting;
   showSliderValues();

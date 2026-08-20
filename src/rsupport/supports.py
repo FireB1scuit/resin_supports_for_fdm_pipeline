@@ -44,8 +44,10 @@ heights, instead of just connecting two convenient points. See
 ``resin._link_angle``.
 
 Nothing here casts a general ray: ``rsupport.raycast.DownRay`` only does
-straight down, which is all this stage needs, and a leaning strut's axis is
-still a straight segment.
+straight down, which is all this stage needs. A leaning strut's axis is still a
+straight segment; a shaft that has had to route around the model is a polyline,
+which :class:`PathXY` lofts along the same way — the maths above is unchanged,
+because ``m`` is bounded per segment exactly as it is for a straight lean.
 """
 
 from __future__ import annotations
@@ -68,6 +70,7 @@ __all__ = [
     "foot_profile",
     "tip_profile",
     "LineXY",
+    "PathXY",
     "overhang_angles",
 ]
 
@@ -179,6 +182,44 @@ class LineXY:
         dz = self.p1[2] - self.p0[2]
         t = 0.0 if abs(dz) <= _EPS else (z - self.p0[2]) / dz
         return self.p0[:2] + (self.p1[:2] - self.p0[:2]) * t
+
+
+class PathXY:
+    """Callable ``z -> (x, y)`` along a polyline that only ever rises.
+
+    A shaft routed around the model is no longer a straight line: it steps
+    sideways as it descends, so its axis is a chain of segments rather than one.
+    Lofting still works the same way — :func:`rings_on_axis` only ever asks an
+    axis where it is at a given height — provided the loft is given a ring at
+    every vertex. Sample between two vertices and the shell cuts the corner,
+    which on a path that exists precisely to dodge the model means cutting
+    through it. :meth:`heights` is what the caller merges into its profile.
+    """
+
+    __slots__ = ("pts",)
+
+    def __init__(self, pts):
+        pts = np.atleast_2d(np.asarray(pts, dtype=np.float64))
+        if pts.shape[1] != 3:
+            raise ValueError(f"expected (N,3) path points, got {pts.shape}")
+        order = np.argsort(pts[:, 2], kind="stable")
+        self.pts = pts[order]
+
+    def heights(self) -> np.ndarray:
+        return self.pts[:, 2]
+
+    def __call__(self, z: float) -> np.ndarray:
+        zs = self.pts[:, 2]
+        z = float(z)
+        if len(zs) == 1 or z <= zs[0]:
+            return self.pts[0, :2]
+        if z >= zs[-1]:
+            return self.pts[-1, :2]
+        i = int(np.searchsorted(zs, z, side="right")) - 1
+        i = min(max(i, 0), len(zs) - 2)
+        dz = zs[i + 1] - zs[i]
+        t = 0.0 if dz <= _EPS else (z - zs[i]) / dz
+        return self.pts[i, :2] + (self.pts[i + 1, :2] - self.pts[i, :2]) * t
 
 
 # --------------------------------------------------------------------------- #

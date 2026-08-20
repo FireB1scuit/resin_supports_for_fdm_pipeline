@@ -70,6 +70,12 @@ class SupportParams:
     # Vertical sampling step for collision and reachability. Finer follows the
     # model more closely and costs more; this is Cura's "collision resolution".
     collision_pitch: float = 0.6
+    # Supports may only ever land on the build plate. A contact the plate cannot
+    # be routed to is left unsupported rather than propped off the sculpt.
+    # Turning this off is what will one day allow a shaft to start on the model;
+    # that half is not built yet, so off currently buys only the crude
+    # stand-where-you-are fallback in `resin._drop_shaft`.
+    plate_only: bool = True
 
     # --- cross-links ---
     brace_enabled: bool = True
