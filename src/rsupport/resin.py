@@ -5,8 +5,8 @@ make printable on filament. It is *not* an FDM organic tree: nothing fuses into
 a thickening trunk that wanders down to the plate. An SLA support is a set of
 discrete components, and it keeps its shape all the way down::
 
-    contact ── tip ── arm ── shaft ── join cone ── base
-                (angled)  (vertical, thin)         (on the plate)
+    contact ── tip ── arm ── shaft ── base
+                (angled)  (vertical, thin)  (on the plate)
 
 * **tip** — a small cone that meets the surface at roughly a right angle and
   penetrates it slightly, so it snaps off leaving a dot rather than a scar.
@@ -15,8 +15,9 @@ discrete components, and it keeps its shape all the way down::
   (Lychee calls it parenting, or "optimize supports").
 * **shaft** — straight and vertical, ``shaft_upper_diameter`` at the top and
   ``shaft_lower_diameter`` at the bottom. A slight taper, not a trunk.
-* **join cone** — the 45 degree flare from the shaft out to the base.
-* **base** — the footprint on the plate.
+* **base** — the footprint on the plate: a disc of ``foot_diameter``, then a
+  flare in to the shaft. On a lifted model the discs of neighbouring supports
+  overlap into what amounts to a raft.
 * **base tip** — when a shaft has to land on the model instead of the plate, it
   ends in a tip there too, so it snaps off at both ends rather than fusing.
 
@@ -273,13 +274,27 @@ def _group_contacts(elbows: np.ndarray, points, params: SupportParams) -> list[n
         for j in tree.query_ball_point(elbows[i, :2], radius):
             if taken[j]:
                 continue
-            # The shaft top must clear every arm, and cannot go below the plate.
-            if _shaft_top_for(elbows[i, :2], elbows[[*members, j]], params) <= 0.0:
+            # Sharing costs shaft height: the new arm reaches further, so it
+            # has to leave the shaft lower down. Refuse once the shaft would
+            # not even clear its own base — at that point it is a foot with an
+            # arm out of it, there is nothing left for a cross-link to grip,
+            # and each contact is better off on a shaft of its own.
+            if _shaft_top_for(elbows[i, :2], elbows[[*members, j]], params) <= _min_top(params):
                 continue
             members.append(j)
             taken[j] = True
         groups.append(np.array(members))
     return groups
+
+
+def _min_top(params: SupportParams) -> float:
+    """Shortest a shaft may be and still be worth calling a shaft.
+
+    Its own base height: below that the whole shaft is buried inside the base
+    disc. Cross-links start half a base height up (see :func:`_link_shafts`), so
+    a shaft shorter than this cannot be braced at all.
+    """
+    return max(0.0, float(params.foot_height))
 
 
 def _arm_rise(dist: float, params: SupportParams) -> float:
@@ -461,9 +476,10 @@ def _link_shafts(field: AvoidanceField, ray: DownRay, shafts: list[Shaft], param
                 continue
 
             rise = span * tan_a
-            # Start just above the join cones rather than clear of them: on a
-            # short support that half millimetre is the difference between a
-            # link and no link.
+            # Start half way up the bases rather than clear of them: on a
+            # short support that half a base height is the difference between a
+            # link and no link, and a link end buried in a base is buried in
+            # solid material, which costs nothing.
             lo = max(a.land_z, b.land_z) + params.foot_height * 0.5
             hi = min(a.top_z, b.top_z)
             if hi - lo < rise:
@@ -525,10 +541,10 @@ def _shaft_meshes(shaft: Shaft, params: SupportParams) -> list[trimesh.Trimesh]:
     r_up = params.shaft_upper_diameter * 0.5
     x, y = float(shaft.xy[0]), float(shaft.xy[1])
 
-    # Base, join cone and shaft as one continuous stack of rings rather than
-    # three stacked primitives. Stacking leaves the base's top cap and the
-    # shaft's bottom cap face to face, and a flat downward face is a 90 degree
-    # overhang however deeply it is buried.
+    # Base, flare and shaft as one continuous stack of rings rather than three
+    # stacked primitives. Stacking leaves the base's top cap and the shaft's
+    # bottom cap face to face, and a flat downward face is a 90 degree overhang
+    # however deeply it is buried.
     if shaft.on_model:
         # Landing on the model: end in a tip there too, so the support snaps
         # off at the bottom instead of fusing to the sculpt.
@@ -537,7 +553,12 @@ def _shaft_meshes(shaft: Shaft, params: SupportParams) -> list[trimesh.Trimesh]:
         profile = [(z0, params.tip_diameter * 0.5), (z0 + tip_len, r_low)]
     else:
         z0 = 0.0
-        profile = list(foot_profile(0.0, params.foot_height, params.foot_diameter * 0.5, r_low))
+        # A support shorter than the base is not a reason to skip the base —
+        # that support needs the adhesion most — but the base may not grow out
+        # of the top of the shaft it is supposed to sit under, so it is squashed
+        # into whatever height there is.
+        foot_h = min(params.foot_height, max(0.0, shaft.top_z - params.layer_height))
+        profile = list(foot_profile(0.0, foot_h, params.foot_diameter * 0.5, r_low))
 
     if shaft.top_z > profile[-1][0] + _EPS:
         profile.append((float(shaft.top_z), r_up))

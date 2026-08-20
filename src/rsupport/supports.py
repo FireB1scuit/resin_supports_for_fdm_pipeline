@@ -24,8 +24,9 @@ which gives three design rules used throughout:
 
 * A profile that **narrows going up** (``r' <= 0``) is always self-supporting.
   Hence the tip cone is wide at the bottom and thin at the top, the base is a
-  cone flaring *downward*, and the "spherical" tip is a dome rather than a ball
-  (a free-floating sphere's underside is a 90 degree overhang).
+  disc that only ever narrows on its way up, and the "spherical" tip is a dome
+  rather than a ball (a free-floating sphere's underside is a 90 degree
+  overhang).
 * Leaning a strut by ``t`` costs exactly ``t`` degrees of overhang budget, so
   every lean is clamped by :func:`rsupport.avoidance.strut_lean`.
 * A **flat downward face is a 90 degree overhang**, always. So a shaft is built
@@ -71,6 +72,10 @@ __all__ = [
 ]
 
 _EPS = 1e-9
+
+#: Most of the flare the base can afford, as a fraction of its height. The rest
+#: is straight-walled disc — see :func:`foot_profile`.
+FOOT_FLARE_SHARE = 0.5
 
 
 # --------------------------------------------------------------------------- #
@@ -182,8 +187,34 @@ class LineXY:
 
 
 def foot_profile(z0: float, height: float, r_bottom: float, r_top: float):
-    """A cone flaring *downward*: every layer is smaller than the one below."""
-    return [(z0, max(r_bottom, r_top)), (z0 + height, r_top)]
+    """The base: a straight-walled disc on the plate, then a flare to the shaft.
+
+    The disc is the part that does the sticking. A base that starts at
+    ``r_bottom`` and immediately tapers away has its full width for one layer
+    only, so what actually grips the glass is a ring of extrusion; holding the
+    width for a real distance gives a solid puck instead. It also makes the
+    footprints of neighbouring supports *overlap* — with a lifted model there is
+    a shaft roughly every ``support_spacing``, and their bases merge into a
+    continuous raft that is far harder to knock off the plate than any number of
+    separate feet.
+
+    The flare above it narrows going up, so like every profile here it is
+    self-supporting (``r' <= 0`` — see the module docstring). Degenerate cases
+    collapse gracefully: a base no wider than the shaft is a stub of shaft, and
+    a zero-height base is nothing at all.
+    """
+    r_top = float(r_top)
+    r_bottom = max(float(r_bottom), r_top)
+    height = float(height)
+    if height <= _EPS:
+        return [(z0, r_top)]
+    # 45 degrees is the resin convention for the flare, but it does not always
+    # have the room, and the disc has first claim on the height: it is the half
+    # that earns the base its place.
+    flare = min(r_bottom - r_top, height * FOOT_FLARE_SHARE)
+    if flare <= _EPS:
+        return [(z0, r_bottom), (z0 + height, r_top)]
+    return [(z0, r_bottom), (z0 + height - flare, r_bottom), (z0 + height, r_top)]
 
 
 def tip_profile(contact_z: float, tip_len: float, params: SupportParams, base_r: float):
@@ -256,7 +287,8 @@ def make_foot(
     sections: int | None = None,
 ) -> trimesh.Trimesh:
     """Bed adhesion. A bare shaft will not stay stuck to the plate, so a plate
-    landing gets a ``params.foot_diameter`` cone flaring downward to it.
+    landing gets a ``params.foot_diameter`` disc, ``params.foot_height`` tall,
+    flaring up to the shaft. See :func:`foot_profile`.
     """
     base = np.asarray(base, dtype=np.float64)
     sections = sections or params.ring_sections

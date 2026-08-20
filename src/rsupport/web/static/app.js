@@ -190,14 +190,19 @@ function overrides() {
     brace_enabled: $('braces').checked,
     strut_lean_deg: +$('lean').value,
     parenting: +$('parenting').value,
+    lift_height: +$('lift').value,
+    foot_diameter: +$('base').value,
+    foot_height: +$('baseh').value,
   };
 }
 
 function syncSliders(p) {
   if (!p) return;
   for (const [id, key] of [['tip', 'tip_diameter'], ['shaft', 'shaft_lower_diameter'],
-                           ['spacing', 'support_spacing'], ['overhang', 'overhang_angle_deg']]) {
-    $(id).value = p[key];
+                           ['spacing', 'support_spacing'], ['overhang', 'overhang_angle_deg'],
+                           ['lift', 'lift_height'], ['base', 'foot_diameter'],
+                           ['baseh', 'foot_height']]) {
+    if (p[key] != null) $(id).value = p[key];
   }
   $('tipstyle').value = p.tip_style;
   $('braces').checked = p.brace_enabled;
@@ -213,8 +218,11 @@ function showSliderValues() {
   $('overhang_v').textContent = $('overhang').value + '°';
   $('lean_v').textContent = $('lean').value + '°';
   $('parenting_v').textContent = (+$('parenting').value).toFixed(2);
+  $('lift_v').textContent = (+$('lift').value).toFixed(1) + ' mm';
+  $('base_v').textContent = (+$('base').value).toFixed(1) + ' mm';
+  $('baseh_v').textContent = (+$('baseh').value).toFixed(1) + ' mm';
 }
-['tip', 'shaft', 'spacing', 'overhang', 'lean', 'parenting']
+['tip', 'shaft', 'spacing', 'overhang', 'lean', 'parenting', 'lift', 'base', 'baseh']
   .forEach(id => $(id).addEventListener('input', showSliderValues));
 
 // ---------------------------------------------------------------- pipeline
@@ -314,6 +322,24 @@ async function runSupports() {
   ['dl3mf', 'dlstl', 'dlsep'].forEach(id => $(id).disabled = false);
 }
 
+/** The lift moves the model itself, so the viewer's copy of it is stale too.
+ *  Stage 2 re-floats it server-side; all this has to do is fetch it again. */
+async function relift() {
+  if (!state.sid || state.busy) return;
+  busy(true);
+  try {
+    const mm = +$('lift').value;
+    log(mm > 0 ? `floating the model ${mm.toFixed(1)} mm off the plate …` : 'setting the model down …');
+    await runPoints();
+    await loadSTL(`/api/mesh/${state.sid}/model`, 'model');
+    await runSupports();
+  } catch (err) {
+    log(`error: ${err.message}`, 'e');
+  } finally {
+    busy(false);
+  }
+}
+
 /** Re-run only what actually changed. Geometry params are cheap; placement is not. */
 async function rerun(scope) {
   if (!state.sid || state.busy) return;
@@ -403,6 +429,10 @@ document.querySelectorAll('[data-toggle]').forEach(btn => {
 $('tipstyle').addEventListener('change', () => rerun('geometry'));
 $('braces').addEventListener('change', () => rerun('geometry'));
 ['lean', 'parenting'].forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
+['base', 'baseh'].forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
+// The lift moves the model, so the point list has to be placed again on top of
+// rebuilding the scaffold — see relift().
+$('lift').addEventListener('change', relift);
 $('preset').addEventListener('change', async () => {
   if (!state.sid || state.busy) return;
   busy(true);

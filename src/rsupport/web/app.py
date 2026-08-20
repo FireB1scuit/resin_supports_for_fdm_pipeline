@@ -43,6 +43,10 @@ class Session:
     id: str
     original: trimesh.Trimesh
     params: SupportParams
+    #: The chosen pose, sitting flat on z=0. `oriented` is this same mesh
+    #: floated up by ``params.lift_height`` — kept apart so moving the lift
+    #: slider is a translation rather than another orientation search.
+    grounded: trimesh.Trimesh | None = None
     oriented: trimesh.Trimesh | None = None
     orientations: list = field(default_factory=list)
     applied: int = 0
@@ -106,6 +110,27 @@ def _resolve_params(session: Session, patch: ParamPatch) -> SupportParams:
     return params.with_(**patch.overrides)
 
 
+def _set_params(session: Session, patch: ParamPatch) -> SupportParams:
+    """Resolve a patch onto the session and re-float the model if it moved.
+
+    The lift is the one parameter that changes the *model*, not the supports, so
+    it is applied here rather than in a geometry stage. Everything downstream
+    reads absolute Z, so a moved model invalidates the point list — the caller
+    is stage 2 or a stage-3 run whose points came back from the client with the
+    model in its old place, and only re-running stage 2 fixes that. The UI
+    re-runs both.
+    """
+    session.params = _resolve_params(session, patch)
+    if session.grounded is not None:
+        lift = float(session.params.lift_height)
+        current = float(session.oriented.bounds[0][2]) if session.oriented is not None else None
+        if current is None or abs(current - lift) > 1e-9:
+            session.oriented = mesh_io.set_lift(session.grounded, lift)
+            session.points = []
+            session.supports = None
+    return session.params
+
+
 # --------------------------------------------------------------------- app
 
 app = FastAPI(title="resin supports for FDM", docs_url="/api/docs")
@@ -129,7 +154,8 @@ def api_model(file: UploadFile = File(...)) -> dict:
         raise HTTPException(400, f"could not read {file.filename!r}: {exc}") from exc
 
     session = Session(id=uuid.uuid4().hex[:12], original=mesh, params=presets.get())
-    session.oriented = mesh_io.drop_to_bed(mesh)
+    session.grounded = mesh_io.drop_to_bed(mesh)
+    session.oriented = mesh_io.set_lift(session.grounded, session.params.lift_height)
     _put(session)
     return {"id": session.id, "name": file.filename, "summary": mesh_io.summary(mesh)}
 
@@ -145,13 +171,14 @@ def api_orient(sid: str, req: OrientRequest) -> dict:
     if req.skip:
         session.orientations = []
         session.applied = 0
-        session.oriented = mesh_io.drop_to_bed(session.original)
+        session.grounded = mesh_io.drop_to_bed(session.original)
     else:
         session.orientations = orient_mod.orientations(session.original, session.params, top_k=3)
         session.applied = min(req.pick, len(session.orientations) - 1)
-        session.oriented = orient_mod.apply(
+        session.grounded = orient_mod.apply(
             session.original, session.orientations[session.applied]
         )
+    session.oriented = mesh_io.set_lift(session.grounded, session.params.lift_height)
 
     # An orientation change invalidates everything downstream.
     session.points = []
@@ -169,7 +196,7 @@ def api_points(sid: str, req: PointsRequest) -> dict:
     session = _get(sid)
     from .. import sampling
 
-    session.params = _resolve_params(session, req)
+    _set_params(session, req)
     if session.oriented is None:
         raise HTTPException(409, "orient the model first")
 
@@ -178,6 +205,7 @@ def api_points(sid: str, req: PointsRequest) -> dict:
     session.supports = None
     return {
         "elapsed": time.perf_counter() - t0,
+        "lift": float(session.params.lift_height),
         "points": [p.as_dict() for p in session.points],
     }
 
@@ -187,7 +215,7 @@ def api_supports(sid: str, req: SupportsRequest) -> dict:
     session = _get(sid)
     from .. import supports as supports_mod
 
-    session.params = _resolve_params(session, req)
+    _set_params(session, req)
     if session.oriented is None:
         raise HTTPException(409, "orient the model first")
 

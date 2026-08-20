@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
-__all__ = ["load", "save", "concat", "drop_to_bed", "mesh_from_bytes", "summary"]
+__all__ = ["load", "save", "concat", "drop_to_bed", "set_lift", "mesh_from_bytes", "summary"]
 
 SUPPORTED_SUFFIXES = {".stl", ".obj", ".ply", ".3mf", ".off", ".glb", ".gltf"}
 
@@ -73,15 +73,34 @@ def concat(*meshes: trimesh.Trimesh) -> trimesh.Trimesh:
     return trimesh.util.concatenate(parts)
 
 
-def drop_to_bed(mesh: trimesh.Trimesh, center_xy: bool = True) -> trimesh.Trimesh:
-    """Translate so the lowest point sits at z=0, optionally centred in XY."""
+def drop_to_bed(
+    mesh: trimesh.Trimesh, center_xy: bool = True, lift: float = 0.0
+) -> trimesh.Trimesh:
+    """Translate so the lowest point sits at ``lift``, optionally centred in XY.
+
+    The build plate is always z=0 everywhere downstream, so a non-zero `lift`
+    leaves the model floating with clear air underneath and the scaffold spans
+    the gap. See ``SupportParams.lift_height``.
+    """
     mesh = mesh.copy()
     lo, hi = mesh.bounds
-    shift = np.array([0.0, 0.0, -lo[2]])
+    shift = np.array([0.0, 0.0, -lo[2] + max(0.0, float(lift))])
     if center_xy:
         shift[0] = -(lo[0] + hi[0]) * 0.5
         shift[1] = -(lo[1] + hi[1]) * 0.5
     mesh.apply_translation(shift)
+    return mesh
+
+
+def set_lift(mesh: trimesh.Trimesh, lift: float) -> trimesh.Trimesh:
+    """Move an already-posed mesh so its lowest point sits at ``lift``.
+
+    Only the Z shift, so a model that has been oriented and centred keeps both.
+    Cheap enough to re-run every time the lift slider moves, which is the point:
+    changing the lift must not re-run the orientation search.
+    """
+    mesh = mesh.copy()
+    mesh.apply_translation([0.0, 0.0, max(0.0, float(lift)) - float(mesh.bounds[0][2])])
     return mesh
 
 

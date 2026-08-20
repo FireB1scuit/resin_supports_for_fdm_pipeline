@@ -77,10 +77,23 @@ class SupportParams:
     brace_max_span: float = 12.0
 
     # --- base ---
+    # Bed adhesion, and the one part of the scaffold deliberately *not* derived
+    # from the nozzle: what holds onto a plate is a footprint measured in mm,
+    # not a multiple of an extrusion width. A disc this wide and this tall sits
+    # under every shaft that reaches the plate, and because a lifted model needs
+    # a shaft roughly every `support_spacing`, neighbouring discs overlap into
+    # something very close to a raft.
     foot_diameter: float = 5.0
-    foot_height: float = 0.6
+    foot_height: float = 2.0
 
     # --- placement ---
+    # How far the whole model floats above the plate. This is what a resin
+    # printer does — the sculpt hangs off the scaffold rather than being printed
+    # against the plate — and on FDM it buys the same things: no elephant's foot
+    # on the model, no first-layer squish across its underside, and a bottom
+    # face that is supported like any other overhang instead of being ignored as
+    # "on the bed". 0 sets the model down flat on the plate.
+    lift_height: float = 5.0
     overhang_angle_deg: float = 45.0
     support_spacing: float = 3.0
     max_unsupported_span: float = 5.0

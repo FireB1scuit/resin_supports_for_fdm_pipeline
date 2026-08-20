@@ -228,3 +228,53 @@ def test_build_supports_builds_the_scaffold():
         len(build_supports(model, points, PARAMS).mesh.faces)
         == len(build_resin(model, points, PARAMS).mesh.faces)
     )
+
+
+# --------------------------------------------------------------------------- #
+# 5. the model in the air
+# --------------------------------------------------------------------------- #
+
+
+def test_the_bases_of_a_lifted_model_overlap_into_a_raft():
+    """Why the base is as wide as it is.
+
+    With the model held in the air a shaft lands roughly every
+    ``support_spacing``, so a base wider than that spacing means neighbouring
+    footprints *merge*. What ends up on the glass is one sheet rather than a
+    field of separate discs, and a scaffold of 1.2 mm shafts stays put.
+    """
+    lift = 5.0
+    params = PARAMS.with_(lift_height=lift)
+    assert params.foot_diameter > params.support_spacing, (
+        "a base narrower than the support spacing could not overlap anything"
+    )
+    model = mesh_io.drop_to_bed(trimesh.creation.box(extents=[14, 14, 10]), lift=lift)
+
+    points = sampling.place_points(model, params)
+    shafts, _, _, _, _ = plan(model, points, params)
+    feet = np.array([s.xy for s in shafts if not s.on_model])
+    assert len(feet) > 4, "a lifted slab should stand on a forest of shafts"
+
+    d = np.linalg.norm(feet[:, None] - feet[None], axis=-1)
+    np.fill_diagonal(d, np.inf)
+    touching = d.min(axis=1) < params.foot_diameter
+    assert touching.mean() > 0.9, (
+        f"only {touching.mean():.0%} of bases overlap a neighbour; that is a field "
+        "of discs, not a raft"
+    )
+
+
+def test_a_lifted_model_is_held_off_the_plate_by_supports_alone():
+    """Nothing of the model may touch the plate, and every support must reach
+    it — the whole point of lifting is that the scaffold carries the model."""
+    lift = 5.0
+    params = PARAMS.with_(lift_height=lift)
+    model = mesh_io.drop_to_bed(mesh_io.load("samples/synthetic_mini.stl"), lift=lift)
+    assert model.bounds[0][2] == pytest.approx(lift, abs=1e-6)
+
+    build = build_resin(model, sampling.place_points(model, params), params)
+    assert build.mesh.bounds[0][2] == pytest.approx(0.0, abs=1e-6)
+    assert build.mesh.bounds[1][2] <= model.bounds[1][2] + params.tip_penetration + 1e-6
+    rep = printability_report(build.mesh, params, model)
+    assert rep["violations"] == 0
+

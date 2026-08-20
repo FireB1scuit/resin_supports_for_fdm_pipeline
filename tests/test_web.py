@@ -11,7 +11,10 @@ import pytest
 import trimesh
 from fastapi.testclient import TestClient
 
+from rsupport.types import SupportParams
 from rsupport.web.app import app
+
+DEFAULTS = SupportParams()
 
 
 @pytest.fixture
@@ -46,12 +49,42 @@ def test_upload_returns_session_and_summary(client, stl_bytes):
     assert body["summary"]["size"] == pytest.approx([10, 10, 20])
 
 
-def test_uploaded_model_is_dropped_to_the_bed(client, stl_bytes):
-    """Whatever z the file was authored at, the viewer should see it on z=0."""
-    sid = _upload(client, stl_bytes).json()["id"]
+def _model_mesh(client, sid):
     data = client.get(f"/api/mesh/{sid}/model").content
-    mesh = trimesh.load(io.BytesIO(data), file_type="stl")
-    assert mesh.bounds[0][2] == pytest.approx(0.0, abs=1e-6)
+    return trimesh.load(io.BytesIO(data), file_type="stl")
+
+
+def test_uploaded_model_is_floated_by_the_default_lift(client, stl_bytes):
+    """Whatever z the file was authored at, the viewer sees it at the lift."""
+    sid = _upload(client, stl_bytes).json()["id"]
+    mesh = _model_mesh(client, sid)
+    assert mesh.bounds[0][2] == pytest.approx(DEFAULTS.lift_height, abs=1e-6)
+    assert DEFAULTS.lift_height > 0, "the default is to float the model, not set it down"
+
+
+def test_lift_moves_the_model_the_viewer_is_served(client, stl_bytes):
+    """The lift is a session-level move, so the viewer's copy has to change too.
+
+    Zero has to work as well as any other value: it is how you ask for the model
+    flat on the plate.
+    """
+    sid = _upload(client, stl_bytes).json()["id"]
+    for lift in (12.0, 0.0):
+        body = client.post(f"/api/points/{sid}", json={"overrides": {"lift_height": lift}}).json()
+        assert body["lift"] == pytest.approx(lift)
+        assert _model_mesh(client, sid).bounds[0][2] == pytest.approx(lift, abs=1e-6)
+
+
+def test_lift_does_not_disturb_the_pose(client, stl_bytes):
+    """Only Z moves — a lift must not re-centre or re-orient anything."""
+    sid = _upload(client, stl_bytes).json()["id"]
+    before = _model_mesh(client, sid)
+    client.post(f"/api/points/{sid}", json={"overrides": {"lift_height": 3.0}})
+    after = _model_mesh(client, sid)
+    assert after.bounds[:, :2] == pytest.approx(before.bounds[:, :2], abs=1e-6)
+    assert after.bounds[1][2] - after.bounds[0][2] == pytest.approx(
+        before.bounds[1][2] - before.bounds[0][2], abs=1e-6
+    )
 
 
 def test_garbage_upload_is_rejected(client):

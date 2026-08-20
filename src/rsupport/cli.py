@@ -32,6 +32,18 @@ def _add_param_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--overhang", type=float, dest="overhang_angle_deg", help="overhang angle (deg)")
     g.add_argument("--tip-style", dest="tip_style", choices=["conical", "spherical"])
     g.add_argument(
+        "--lift",
+        type=float,
+        dest="lift_height",
+        help="how far the model floats above the plate (mm); 0 sets it down flat",
+    )
+    g.add_argument(
+        "--base-width", type=float, dest="foot_diameter", help="adhesion base diameter (mm)"
+    )
+    g.add_argument(
+        "--base-height", type=float, dest="foot_height", help="adhesion base height (mm)"
+    )
+    g.add_argument(
         "--lean",
         type=float,
         dest="strut_lean_deg",
@@ -62,6 +74,9 @@ def _params_from_args(args) -> SupportParams:
             "tip_style",
             "strut_lean_deg",
             "parenting",
+            "lift_height",
+            "foot_diameter",
+            "foot_height",
         )
     }
     overrides = {k: v for k, v in overrides.items() if v is not None}
@@ -122,8 +137,12 @@ def cmd_supports(args) -> int:
         chosen = results[min(args.pick, len(results) - 1)]
         mesh = orient_mod.apply(mesh, chosen)
         print(f"oriented '{chosen.label}' (score {chosen.score:.4f}) in {time.perf_counter()-t0:.2f}s")
+        mesh = mesh_io.set_lift(mesh, params.lift_height)
     else:
-        mesh = mesh_io.drop_to_bed(mesh)
+        mesh = mesh_io.drop_to_bed(mesh, lift=params.lift_height)
+
+    if params.lift_height > 0:
+        print(f"floating the model {params.lift_height:g} mm above the plate")
 
     t0 = time.perf_counter()
     points = sampling.place_points(mesh, params)

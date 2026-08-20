@@ -49,8 +49,12 @@ __all__ = [
 ISLAND_STEP_LAYERS = 4
 
 # A face is resting on the build plate, not overhanging, if its whole extent is
-# within this many layers of the model's lowest point.
+# within this many layers of the plate.
 BED_LAYERS = 2.0
+
+# The build plate. Fixed, not read off the model: stage 1 sets the model down at
+# z=0 or floats it above by ``lift_height``, and either way the plate stays here.
+PLATE_Z = 0.0
 
 # Minimum spacing at severity 1 (straight down) as a fraction of
 # params.support_spacing. 0.5 means flat undersides get twice the density of a
@@ -110,10 +114,14 @@ def _bed_faces(mesh, params: SupportParams) -> np.ndarray:
 
     The underside of a cone standing on its base points straight down and would
     otherwise be the single most heavily supported surface on the model.
+
+    Measured against the plate at z=0, *not* against the model's own lowest
+    point. Those are the same thing only when the model is set down flat; with
+    ``lift_height`` the model floats, and then its underside is genuinely
+    printing into air and wants supporting like any other 90 degree overhang.
     """
     tri_z = np.asarray(mesh.triangles, dtype=np.float64)[:, :, 2]
-    bed = float(mesh.bounds[0][2])
-    return tri_z.max(axis=1) <= bed + params.layer_height * BED_LAYERS
+    return tri_z.max(axis=1) <= PLATE_Z + params.layer_height * BED_LAYERS
 
 
 def _supportable(points: np.ndarray, mesh, params: SupportParams, ray: DownRay) -> np.ndarray:
@@ -135,7 +143,9 @@ def _supportable(points: np.ndarray, mesh, params: SupportParams, ray: DownRay) 
     buried = ray.inside(probe)
 
     z_below, _, hit = ray.z_below(points)
-    floor = np.where(hit, z_below, float(mesh.bounds[0][2]))
+    # Nothing below means the plate is what is below, whether or not the model
+    # is sitting on it — a lifted model has air under its whole footprint.
+    floor = np.where(hit, z_below, PLATE_Z)
     clearance = points[:, 2] - floor
 
     return (~buried) & (clearance > params.tip_length)

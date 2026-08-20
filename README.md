@@ -16,9 +16,14 @@ This does the other half: it generates the supports itself, at FDM dimensions,
 on any model.
 
 Models are taken **as posed in the file** — rotate it how you want it printed
-before you drop it in, and the pipeline just sets it down on the bed. There is
-an experimental auto-orient button, but choosing a print pose is a judgement
-call and yours beats a scoring function's.
+before you drop it in. There is an experimental auto-orient button, but choosing
+a print pose is a judgement call and yours beats a scoring function's.
+
+By default the model is then **lifted 5 mm off the plate** and the scaffold
+carries it, which is what a resin printer does. Nothing of the sculpt is printed
+against glass: no elephant's foot, no squashed first layer, and its underside is
+supported like any other overhang instead of being ignored. Slide the lift to 0
+if you would rather set it down flat.
 
 ## The support spec
 
@@ -33,9 +38,12 @@ to the surface. So the geometry stays resin-like and the numbers change:
 | Tip cone | narrows *upward*, so every layer is smaller than the one below and the support needs no support of its own |
 | Arms | several tips fan off one shaft, so there are far fewer feet to snap off than there are contact points |
 | Cross-links | diagonal struts tying the shafts into a lattice, so the structure braces itself instead of balancing a stick on each foot |
+| Base | a 5 × 2 mm disc under every shaft. Lifted, the model needs a shaft every few mm, so the discs overlap into a raft |
 | Support layer height | 2× the model's — supports carry no detail, so print them coarse |
 
-Every one of those is derived from your nozzle diameter, not hardcoded.
+Every one of those is derived from your nozzle diameter, not hardcoded — except
+the base, which is sized in plain millimetres because it answers to the build
+plate rather than to the nozzle.
 
 ---
 
@@ -98,7 +106,7 @@ localhost, anyone who can reach that address can use the app.
 
 1. **Pose your model first.** Rotate it in whatever tool you like so it stands
    the way you want it printed, and export. This tool does not rotate it for
-   you — it sets it down on the bed exactly as authored.
+   you — it uses the pose exactly as authored, and floats it above the plate.
 2. **Drop the STL onto the page** (or click to browse). `.stl`, `.obj`, `.ply`,
    `.3mf` and `.off` all load.
 3. It runs immediately — finds the overhangs and islands, places contact points,
@@ -135,6 +143,7 @@ Either edit rebuilds only the geometry, so it comes back in well under a second.
 | Control | What it does | Reach for it when |
 |---|---|---|
 | **preset** | swaps the whole parameter set for a nozzle | you change nozzles |
+| **lift off plate** | how far the model floats above the bed, 0–20 mm | the underside matters and you want it held rather than squashed (raise); you want the model printed flat on the plate (0) |
 | **parenting** | how many tips share one shaft | fewer feet to snap off (raise); shorter, more direct arms (lower) |
 | **strut lean** | how far anything may tilt off vertical | a shaft cannot get around an obstacle (raise), or leaning struts are failing to print (lower) |
 | **tip ø** | how wide the support is where it touches | supports snap off during the print (raise) or leave visible scars (lower) |
@@ -143,10 +152,13 @@ Either edit rebuilds only the geometry, so it comes back in well under a second.
 | **overhang** | the angle at which a face is judged to need support | steep walls are being supported unnecessarily (lower) or a shallow slope droops (raise) |
 | **tip style** | conical or spherical contact | spherical snaps off cleaner but grips less |
 | **cross-links** | diagonal struts between slender shafts | turn off only if removal is a nightmare — they exist so tips can stay thin |
+| **base ø** | width of the disc each shaft stands on | supports peel off the plate mid-print (raise); the raft is welded to the bed and impossible to remove (lower) |
+| **base height** | how tall that disc is | the same trade, but height buys grip without eating more bed area |
 
-Changing **tip ø**, **shaft ø**, **tip style** or **cross-links** rebuilds geometry
-only, which is fast. Changing **spacing** or **overhang** re-decides where
-supports go, which takes a moment longer. Sliders act on release, not on drag.
+Changing **tip ø**, **shaft ø**, **tip style**, **cross-links** or either **base**
+dimension rebuilds geometry only, which is fast. Changing **spacing** or
+**overhang** re-decides where supports go, which takes a moment longer. Changing
+**lift** moves the model, so it redoes both. Sliders act on release, not on drag.
 
 ## Orientation (optional)
 
@@ -223,6 +235,8 @@ Useful flags for `supports`:
 | `--preset NAME` | see the table below |
 | `--nozzle MM` | re-derives every dimension from scratch |
 | `--tip`, `--shaft`, `--spacing`, `--overhang` | override one value |
+| `--lift MM` | how far the model floats above the plate; `--lift 0` sets it down flat |
+| `--base-width MM`, `--base-height MM` | the adhesion disc under each shaft |
 | `--tip-style {conical,spherical}` | |
 | `--lean DEG` | how far a strut may lean off vertical |
 | `--parenting 0..1` | how many tips share a shaft |
@@ -308,9 +322,14 @@ flags **more** faces, because it widens the cone of normals counted as
 "pointing downward".
 
 Faces sitting on the build plate are removed first — a face is on the plate if
-its *highest* vertex is within two layer heights of the model's lowest point.
-Without that, the underside of anything standing on a flat base is the most
-heavily supported surface on the model, and it is already touching the bed.
+its *highest* vertex is within two layer heights of **z = 0**. Without that, the
+underside of anything standing on a flat base is the most heavily supported
+surface on the model, and it is already touching the bed.
+
+That test is against the plate, not against the model's own lowest point, and
+the difference is the whole lift feature. Lift the model and its underside is no
+longer within two layers of anything — it is a 90° overhang hanging in air, and
+it gets held like one, across its entire footprint.
 
 ### 2. Islands: cross-sections that start in mid-air
 
@@ -449,17 +468,16 @@ That single line decides nearly every design choice in stage 3:
 
 - **A profile that narrows going up (`r' ≤ 0`) is always self-supporting**,
   whatever else is happening. Hence the contact tip is wide at the bottom and
-  thin at the top, the base is a cone flaring *downward*, and the "spherical" tip
-  is a dome rather than a ball — a free-floating sphere's underside is a 90°
+  thin at the top, the base only ever narrows on its way up, and the "spherical"
+  tip is a dome rather than a ball — a free-floating sphere's underside is a 90°
   overhang.
 - **Leaning by `t` costs exactly `t` degrees** of the budget (`m = tan t`), so
   every lean in the project is clamped to `strut_lean`, itself clamped to
   `printable_overhang_deg − 2`.
 - **A flat downward face is a 90° overhang, always** — including one buried deep
   inside another support. So a shaft is lofted as one continuous stack of rings
-  (base → join cone → shaft), not as three capped primitives stacked face to
-  face, and every buried cap is suppressed rather than left touching its
-  neighbour.
+  (base → flare → shaft), not as three capped primitives stacked face to face,
+  and every buried cap is suppressed rather than left touching its neighbour.
 
 Cross-links are the exception that proves it. A plain strut laid at angle `a`
 above horizontal has **side walls** overhanging by `90 − a` and **end caps**
@@ -593,7 +611,7 @@ plastic.
 
 | Part | Profile `(z, r)` | Why it is safe |
 |---|---|---|
-| Base | `(z0, r_foot) → (z0+h, r_shaft)` | cone flaring downward, `r' < 0` |
+| Base | `(z0, r_foot) → (z0+h−f, r_foot) → (z0+h, r_shaft)` | a straight-walled disc (`r' = 0`), then a flare in to the shaft (`r' < 0`). The disc is what grips the plate; a bare cone is at full width for one layer only |
 | Shaft | `(bottom, r_lower) → (top, r_upper)` | slight upward taper, `r' < 0` |
 | Conical tip | `(base_r) → (contact, r_tip) → (contact+pen, r_tip)` | narrows upward, then sunk `tip_penetration` into the model |
 | Spherical tip | `(z_eq + R·sin φ, R·cos φ)` for `φ = 30°, 55°, 75°, 85°` | only the **upper** hemisphere is emitted; the lower half is replaced by the taper running up to the equator |
@@ -610,7 +628,6 @@ shaft           = clamp(6.0 · nozzle, 1.0, 2.0)
 link            = clamp(4.0 · nozzle, 2 · nozzle, 0.8 · shaft)
 tip_length      = max(1.0, shaft)
 tip_penetration = max(0.05, 1.25 · layer_height)
-foot ø          = max(4.0, 4 · shaft)
 max span        = max(4.0, 4 · shaft)
 xy_clearance    = max(0.3, 2 · nozzle)
 collision pitch = max(0.4, 6 · layer_height)
@@ -622,6 +639,12 @@ printer cannot lay it down at all"; the 6.0 on the shaft is what puts a 0.2 mm
 nozzle on the 1.2 mm shaft the Resin2FDM documentation recommends. Change the
 nozzle and the whole support system rescales coherently.
 
+The base — 5 mm wide, 2 mm tall — is the one dimension deliberately left out of
+that. It is not a feature the nozzle has to draw, it is a footprint on a piece of
+glass, and a plate needs the same square millimetres of contact whether a 0.2 or
+a 0.4 nozzle is filling them in. The lift is absolute for the same reason: 5 mm
+of air is 5 mm of air.
+
 ---
 
 # Development
@@ -630,6 +653,6 @@ See [CLAUDE.md](CLAUDE.md) for the module map, the git rules and the invariants.
 The full design is in [docs/PLAN.md](docs/PLAN.md).
 
 ```bash
-python -m pytest                              # 129 tests
+python -m pytest                              # 142 tests
 python scripts/make_sample.py samples/synthetic_mini.stl
 ```

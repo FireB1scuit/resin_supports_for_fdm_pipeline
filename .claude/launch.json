@@ -4,8 +4,9 @@
     {
       "name": "rsupport-web",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "rsupport.web"],
-      "port": 8000
+      "runtimeArgs": ["-m", "rsupport.web", "--no-browser"],
+      "port": 8010,
+      "autoPort": true
     }
   ]
 }
