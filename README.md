@@ -122,17 +122,31 @@ Buttons top-left toggle each layer:
 |---|---|
 | **model** | the miniature, grey |
 | **supports** | the generated geometry, orange |
-| **contact points** | a red dot at every point a support touches. **Off by default — turn it on to edit supports** |
+| **contact points** | a dot at every point a support touches, in two reds. **Off by default — turn it on to edit supports** |
 | **wireframe** | see through the model |
 
 Drag to orbit, scroll to zoom.
+
+The two reds are the whole point of that third toggle:
+
+| | |
+|---|---|
+| faded red | a contact that got a support |
+| solid deep red, slightly larger | a contact **nothing could reach** — that overhang is going to print unheld |
+
+Held points are washed out deliberately: there are hundreds of them and they are
+covering the surface you are trying to look at. The unheld ones are usually a
+handful, and they are the ones worth doing something about — raise **strut
+lean**, drop the **lift**, or delete the point and shift-click a replacement
+somewhere with a clearer run down to the plate. The count is in the stats panel
+too, but a number in a sidebar does not tell you *where*.
 
 ## Editing supports by hand
 
 The automatic placement is a starting point, not a verdict.
 
-- **Delete one** — turn on **contact points**, then click a red dot. (Clicking
-  does nothing while that layer is hidden.)
+- **Delete one** — turn on **contact points**, then click a dot, either colour.
+  (Clicking does nothing while that layer is hidden.)
 - **Add one** — shift-click anywhere on the model. Hand-placed supports are
   marked mandatory and never get thinned away.
 

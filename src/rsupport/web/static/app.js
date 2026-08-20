@@ -7,6 +7,7 @@ import { STLLoader } from './STLLoader.js';
 const state = {
   sid: null,
   points: [],          // [{position:[x,y,z], normal:[..], forced, source}]
+  dropped: new Set(),  // indices into points that stage 3 could not support
   params: null,        // last params the server reported back
   busy: false,
 };
@@ -51,12 +52,20 @@ scene.add(world);
 const MAT = {
   model: new THREE.MeshStandardMaterial({ color: 0x9aa3af, roughness: 0.72, metalness: 0.04, flatShading: false }),
   supports: new THREE.MeshStandardMaterial({ color: 0xff8a3d, roughness: 0.55, metalness: 0.05 }),
-  point: new THREE.MeshBasicMaterial({ color: 0xff5a5a }),
+  // Contact points come in two flavours and the difference has to be readable
+  // at a glance. Held ones are washed out on purpose — there are hundreds of
+  // them and they are covering the model, so they have to stay out of the way
+  // of the surface underneath. Unheld ones are solid and a touch bigger: those
+  // are the ones worth looking at, and there are usually only a handful.
+  point: new THREE.MeshBasicMaterial({
+    color: 0xff4d4d, transparent: true, opacity: 0.45, depthWrite: false,
+  }),
+  pointDropped: new THREE.MeshBasicMaterial({ color: 0xb00020 }),
 };
 
 let modelMesh = null;
 let supportMesh = null;
-let markers = null;
+let markers = [];   // one InstancedMesh per flavour; .userData.at maps back to state.points
 
 const show = { model: true, supports: true, points: false, wire: false };
 
@@ -151,19 +160,36 @@ function frameModel() {
 }
 
 function rebuildMarkers() {
-  if (markers) { world.remove(markers); markers.geometry.dispose(); markers = null; }
+  markers.forEach(m => { world.remove(m); m.geometry.dispose(); });
+  markers = [];
   if (!state.points.length) return;
 
+  // Split by whether stage 3 managed to support the point. Two meshes rather
+  // than one with per-instance colours: opacity is a property of the material,
+  // and a deep red at 45% over a dark background reads as washed out, not as
+  // urgent. Each mesh remembers which state.points index every instance came
+  // from, so clicking one still deletes the right point.
+  const held = [], unheld = [];
+  state.points.forEach((_, i) => (state.dropped.has(i) ? unheld : held).push(i));
+
   const r = (state.params?.tip_diameter ?? 0.3) * 1.6;
-  const geo = new THREE.SphereGeometry(r, 8, 6);
-  markers = new THREE.InstancedMesh(geo, MAT.point, state.points.length);
   const m = new THREE.Matrix4();
-  state.points.forEach((p, i) => {
-    m.makeTranslation(p.position[0], p.position[1], p.position[2]);
-    markers.setMatrixAt(i, m);
-  });
-  markers.instanceMatrix.needsUpdate = true;
-  world.add(markers);
+  for (const [idx, mat, scale] of [[held, MAT.point, 1], [unheld, MAT.pointDropped, 1.45]]) {
+    if (!idx.length) continue;
+    const mesh = new THREE.InstancedMesh(new THREE.SphereGeometry(r * scale, 8, 6), mat, idx.length);
+    idx.forEach((pi, i) => {
+      const p = state.points[pi].position;
+      m.makeTranslation(p[0], p[1], p[2]);
+      mesh.setMatrixAt(i, m);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.userData.at = idx;
+    // Solid markers draw last, so a dropped point stays visible through the
+    // cloud of translucent ones around it.
+    mesh.renderOrder = mat === MAT.pointDropped ? 2 : 1;
+    markers.push(mesh);
+    world.add(mesh);
+  }
   applyVisibility();
 }
 
@@ -173,7 +199,7 @@ function applyVisibility() {
     MAT.model.wireframe = show.wire;
   }
   if (supportMesh) supportMesh.visible = show.supports;
-  if (markers) markers.visible = show.points;
+  markers.forEach(m => { m.visible = show.points; });
 }
 
 // ---------------------------------------------------------------- params
@@ -306,6 +332,7 @@ async function runPoints() {
   log('placing support points …');
   const r = await postJSON(`/api/points/${state.sid}`, { overrides: overrides() });
   state.points = r.points;
+  state.dropped = new Set();
   rebuildMarkers();
   const forced = state.points.filter(p => p.forced).length;
   log(`${state.points.length} points (${forced} mandatory) in ${r.elapsed.toFixed(2)}s`, 'g');
@@ -318,6 +345,7 @@ async function runSupports() {
     points: state.points,
   });
   state.params = r.params;
+  state.dropped = new Set(r.dropped_points || []);
   syncSliders(r.params);
   await loadSTL(`/api/mesh/${state.sid}/supports`, 'supports').catch(() => {
     log('no supports needed', 'g');
@@ -327,7 +355,10 @@ async function runSupports() {
   $('stats').innerHTML =
     `<b>${r.points}</b> supports &middot; <b>${r.braces}</b> links<br>` +
     `<b>${r.faces.toLocaleString()}</b> triangles` +
-    (r.dropped ? `<br><span style="color:var(--warn)"><b>${r.dropped}</b> dropped (no clear path)</span>` : '');
+    (r.dropped
+      ? `<br><span style="color:var(--err)"><b>${r.dropped}</b> unsupported ` +
+        `&mdash; shown in solid red</span>`
+      : '');
   (r.warnings || []).slice(0, 5).forEach(w => log(w, 'w'));
   log(`built in ${r.elapsed.toFixed(2)}s`, 'g');
 
@@ -395,16 +426,20 @@ renderer.domElement.addEventListener('pointerup', async (e) => {
       source: 'manual',
     });
     log('added a support');
+    state.dropped = new Set();
     rebuildMarkers();
     await rerun('geometry');
     return;
   }
 
-  if (markers && show.points) {
-    const hit = raycaster.intersectObject(markers, false)[0];
+  if (markers.length && show.points) {
+    const hit = raycaster.intersectObjects(markers, false)[0];
     if (hit && hit.instanceId != null) {
-      state.points.splice(hit.instanceId, 1);
+      // Instances are grouped by flavour, so the instance index is not the
+      // point index — the mesh carries the mapping back.
+      state.points.splice(hit.object.userData.at[hit.instanceId], 1);
       log('deleted a support');
+      state.dropped = new Set();
       rebuildMarkers();
       await rerun('geometry');
     }
@@ -436,6 +471,7 @@ $('preset').addEventListener('change', async () => {
   try {
     const r = await postJSON(`/api/points/${state.sid}`, { preset: $('preset').value });
     state.points = r.points;
+    state.dropped = new Set();
     await runSupports();
   } catch (err) { log(`error: ${err.message}`, 'e'); }
   finally { busy(false); }

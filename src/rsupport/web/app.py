@@ -274,10 +274,26 @@ def api_supports(sid: str, req: SupportsRequest) -> dict:
         "points": len(session.points),
         "braces": build.n_braces,
         "dropped": len(build.dropped),
+        # *Which* ones, so the viewer can mark them. Stage 3 hands back the very
+        # objects it was given, so identity is the mapping — matching on
+        # position would have to survive a float round-trip through JSON.
+        "dropped_points": _dropped_indices(session.points, build.dropped),
         "faces": int(len(build.mesh.faces)) if build.mesh is not None else 0,
         "warnings": session.warnings[:20],
         "params": vars(session.params),
     }
+
+
+def _dropped_indices(points: list[SupportPoint], dropped: list[SupportPoint]) -> list[int]:
+    """Positions in `points` of the contacts stage 3 could not support.
+
+    The viewer draws every contact in a washed-out red and these in a solid one,
+    so an overhang left unheld is obvious rather than buried in a log line. It
+    keeps the point list itself intact — a dropped contact is still a contact,
+    still clickable, and still there to be dragged somewhere supportable.
+    """
+    at = {id(p): i for i, p in enumerate(points)}
+    return sorted(at[id(p)] for p in dropped if id(p) in at)
 
 
 @app.get("/api/mesh/{sid}/{which}")
