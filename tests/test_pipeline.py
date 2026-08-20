@@ -67,6 +67,41 @@ def test_pipeline_runs_and_stays_within_the_overhang_budget(mini, preset):
     )
 
 
+@pytest.fixture(scope="module")
+def floating_mini():
+    """The same sculpt in the default pose: held in the air by the scaffold."""
+    return mesh_io.drop_to_bed(build_sample(), lift=presets.get().lift_height)
+
+
+def test_the_default_lift_survives_the_whole_pipeline(floating_mini):
+    """The shipped default floats the model, so that is the path that has to
+    hold up on a real sculpt — not just the flat-on-the-plate case above.
+
+    Lifting is not a handicap here: it hands every shaft the same few extra
+    millimetres of height, which is what a cross-link needs to be placeable at
+    a printable angle, so a floated model comes out *better* braced.
+    """
+    params = presets.get()
+    assert params.lift_height > 0, "the default is to float the model"
+    assert floating_mini.bounds[0][2] == pytest.approx(params.lift_height, abs=1e-6)
+
+    points = sampling.place_points(floating_mini, params)
+    build = supports.build_supports(floating_mini, points, params)
+
+    assert build.mesh.bounds[0][2] == pytest.approx(0.0, abs=1e-6), "supports reach the plate"
+    assert build.n_braces > 0, "a scaffold this tall must be cross-linked"
+
+    share_dropped = len(build.dropped) / max(len(points), 1)
+    assert share_dropped <= DROP_BUDGET, f"dropped {len(build.dropped)}/{len(points)}"
+
+    rep = printability_report(build.mesh, params, floating_mini)
+    share = rep["violations"] / max(rep["total"], 1)
+    assert share <= VIOLATION_BUDGET, (
+        f"{rep['violations']}/{rep['total']} support faces overhang more than "
+        f"{params.printable_overhang_deg} deg ({share:.4%} > {VIOLATION_BUDGET:.2%})"
+    )
+
+
 def test_supports_stay_under_the_model_they_hold(mini):
     """Nothing should tower over the model — supports end at their contact."""
     params = presets.get("mini_0.2")

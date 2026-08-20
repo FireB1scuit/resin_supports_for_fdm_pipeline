@@ -234,6 +234,40 @@ def test_foot_is_wider_than_the_shaft_it_carries():
     assert np.ptp(foot.bounds[:, 0]) > PARAMS.shaft_lower_diameter
 
 
+def test_the_base_holds_its_full_width_for_a_real_distance():
+    """The disc is the part that sticks to the plate.
+
+    A base that starts at full width and tapers away from its very first layer
+    only ever puts a *ring* of extrusion on the glass. Holding the width for a
+    real height gives a solid puck, and gives neighbouring bases something to
+    overlap with.
+    """
+    foot = make_foot([0, 0, 0], PARAMS)
+    v = foot.vertices
+    at_full_width = np.linalg.norm(v[:, :2], axis=1) >= PARAMS.foot_diameter * 0.5 - 1e-6
+    assert at_full_width.any()
+    disc_top = float(v[at_full_width, 2].max())
+    assert disc_top >= PARAMS.foot_height * 0.25, "the disc has no height; it is a cone"
+    assert disc_top < PARAMS.foot_height, "and it still has to flare in to the shaft"
+
+
+def test_base_size_is_exactly_what_was_asked_for():
+    """Both dimensions are user-facing sliders, so neither may drift."""
+    params = PARAMS.with_(foot_diameter=9.0, foot_height=3.0)
+    foot = make_foot([0, 0, 0], params)
+    assert np.ptp(foot.bounds[:, 0]) == pytest.approx(9.0, rel=1e-6)
+    assert foot.bounds[1][2] == pytest.approx(3.0, abs=1e-9)
+    assert foot.bounds[0][2] == pytest.approx(0.0, abs=1e-9)
+    assert_printable(foot, params)
+
+
+def test_a_base_narrower_than_its_shaft_degenerates_to_the_shaft():
+    """The slider goes to zero, and zero has to mean something sane."""
+    foot = make_foot([0, 0, 0], PARAMS.with_(foot_diameter=0.0))
+    assert np.ptp(foot.bounds[:, 0]) == pytest.approx(PARAMS.shaft_lower_diameter, rel=1e-6)
+    assert len(make_foot([0, 0, 0], PARAMS.with_(foot_height=0.0)).faces) == 0
+
+
 # --------------------------------------------------------------------------- #
 # where supports go
 # --------------------------------------------------------------------------- #
@@ -259,6 +293,31 @@ def test_ledge_support_lands_on_the_plate():
     near_plate = build.mesh.vertices[build.mesh.vertices[:, 2] < 1e-9]
     width = 2 * np.linalg.norm(near_plate[:, :2] - np.array([5.0, 0.0]), axis=1).max()
     assert width == pytest.approx(PARAMS.foot_diameter, rel=1e-6)
+
+
+def test_the_base_can_be_turned_off_entirely():
+    model = table(bar_z=10.0)
+    params = PARAMS.with_(foot_height=0.0)
+    build = build_supports(model, [down_point(5.0, 0.0, 10.0)], params)
+
+    near_plate = build.mesh.vertices[build.mesh.vertices[:, 2] < 1e-9]
+    width = 2 * np.linalg.norm(near_plate[:, :2] - np.array([5.0, 0.0]), axis=1).max()
+    assert width == pytest.approx(params.shaft_lower_diameter, rel=1e-6)
+    assert_printable(build.mesh, params, model)
+
+
+def test_a_support_shorter_than_its_own_base_still_gets_one():
+    """The base may not grow out of the top of the shaft it sits under, but a
+    stub of a support is the one that most needs holding onto the plate."""
+    params = PARAMS.with_(foot_height=6.0)
+    model = table(bar_z=3.0)
+    build = build_supports(model, [down_point(5.0, 0.0, 3.0)], params)
+
+    assert build.mesh.bounds[1][2] <= 3.0 + params.tip_penetration + 1e-6
+    near_plate = build.mesh.vertices[build.mesh.vertices[:, 2] < 1e-9]
+    width = 2 * np.linalg.norm(near_plate[:, :2] - np.array([5.0, 0.0]), axis=1).max()
+    assert width == pytest.approx(params.foot_diameter, rel=1e-6)
+    assert_printable(build.mesh, params, model)
 
 
 def test_point_over_solid_geometry_never_pierces_the_model():

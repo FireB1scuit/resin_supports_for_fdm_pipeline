@@ -183,6 +183,21 @@
     </section>
 
     <section>
+      <h2>model</h2>
+      <div class="row">
+        <label for="lift">lift off plate</label>
+        <input type="range" id="lift" min="0" max="20" step=".5">
+        <output id="lift_v"></output>
+      </div>
+      <p style="color:var(--dim); font-size:11px; margin:2px 0 0">
+        The model floats this far above the plate and hangs off the scaffold, the
+        way a resin print does. Its underside gets supported like any other
+        overhang &mdash; no elephant&rsquo;s foot, no squashed first layer.
+        <b>0</b> sets it down flat.
+      </p>
+    </section>
+
+    <section>
       <h2>structure</h2>
       <div class="row">
         <label for="parenting">parenting</label>
@@ -234,6 +249,25 @@
         <label for="braces">cross-links</label>
         <input type="checkbox" id="braces" checked>
       </div>
+    </section>
+
+    <section>
+      <h2>base</h2>
+      <div class="row">
+        <label for="base">base &oslash;</label>
+        <input type="range" id="base" min="0" max="15" step=".5">
+        <output id="base_v"></output>
+      </div>
+      <div class="row">
+        <label for="baseh">base height</label>
+        <input type="range" id="baseh" min="0" max="5" step=".1">
+        <output id="baseh_v"></output>
+      </div>
+      <p style="color:var(--dim); font-size:11px; margin:2px 0 0">
+        A disc under every shaft that reaches the plate. Wide enough and they
+        overlap into a single raft, which is what makes a scaffold of thin
+        shafts stay stuck down.
+      </p>
     </section>
 
     <section>

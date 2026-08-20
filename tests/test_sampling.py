@@ -211,3 +211,41 @@ def test_every_preset_produces_a_usable_list(preset):
     assert pts
     assert all(np.isfinite(p.position).all() for p in pts)
     assert all(np.isfinite(p.normal).all() for p in pts)
+
+
+# --------------------------------------------------------------------------- #
+# lifting the model off the plate
+# --------------------------------------------------------------------------- #
+
+
+def test_a_grounded_flat_bottom_is_not_an_overhang():
+    """It is printed against glass, so it is the one downward face wanting
+    nothing at all. Without this a cone standing on its base is the most heavily
+    supported surface on the model."""
+    box = mesh_io.drop_to_bed(trimesh.creation.box(extents=[10, 10, 20]))
+    assert place_points(box, PARAMS.with_(lift_height=0.0)) == []
+
+
+def test_a_lifted_flat_bottom_is_supported_like_any_other_overhang():
+    """Once the model floats there is nothing under that face but air, and the
+    plate is no longer an excuse to skip it."""
+    lift = 5.0
+    box = mesh_io.drop_to_bed(trimesh.creation.box(extents=[10, 10, 20]), lift=lift)
+    points = place_points(box, PARAMS.with_(lift_height=lift))
+
+    under = positions([p for p in points if p.position[2] < lift + 1e-6])
+    assert len(under) > 8, "the whole underside wants holding, not a few corners"
+    # And held across the footprint, not clustered at the rim.
+    assert np.ptp(under[:, 0]) > 8.0
+    assert np.ptp(under[:, 1]) > 8.0
+
+
+def test_lifting_leaves_room_for_a_contact_tip():
+    """`_supportable` measures clearance down to the floor beneath a point. The
+    floor under a lifted model is the plate, not the model's own underside —
+    reading it off the mesh rejects every point on the face that needs them."""
+    lift = 3.0
+    box = mesh_io.drop_to_bed(trimesh.creation.box(extents=[10, 10, 20]), lift=lift)
+    assert lift > PARAMS.tip_length, "otherwise this proves nothing"
+    assert place_points(box, PARAMS.with_(lift_height=lift))
+

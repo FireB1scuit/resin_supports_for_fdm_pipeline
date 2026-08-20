@@ -63,7 +63,11 @@ def from_nozzle(
         tip_length=round(max(1.0, shaft), 3),
         tip_penetration=round(max(0.05, layer_height * 1.25), 3),
         brace_diameter=round(link, 3),
-        foot_diameter=round(max(4.0, shaft * 4.0), 3),
+        # foot_diameter / foot_height are deliberately left at their defaults.
+        # Every other dimension here scales with the nozzle because it is a
+        # feature the nozzle has to draw; the base is the one part that answers
+        # to the build plate instead, and a plate needs the same square
+        # millimetres of contact whatever is extruding onto it.
         # A tip cannot bridge, so points must sit closer together than the
         # printer's reliable bridging distance.
         max_unsupported_span=round(max(4.0, shaft * 4.0), 3),

@@ -43,7 +43,10 @@ If a push to `main` is ever attempted, stop and open a PR instead.
 - **No Node.js.** The frontend is plain ES modules with a vendored `three.module.js`.
   Never introduce a build step, a bundler, or a `package.json`.
 - **All support dimensions derive from `nozzle_diameter`** in `presets.py`. Never hardcode
-  a millimetre value in geometry code.
+  a millimetre value in geometry code. The one deliberate exception is the **base**
+  (`foot_diameter`, `foot_height`): it answers to the build plate, not to the nozzle, and a
+  plate needs the same square millimetres of contact whatever is extruding onto it. It is
+  left at its default in `from_nozzle` on purpose — do not "fix" that by deriving it.
 - **The self-printability invariant**: generated support geometry must not contain an
   overhang steeper than the printable limit. If our supports would need supports, the
   generator is broken. `tests/test_supports.py` enforces it exactly on constructed
@@ -58,10 +61,24 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   should print; the pipeline only sets it down on the bed. Auto-orientation exists in
   `orient.py` but is **opt-in** (`--auto-orient`, or the button in the UI) and must never
   be on the default path.
+- **The plate is z=0, and by default the model is not on it.** `lift_height` (default
+  5 mm, slider 0-20) floats the whole model and the scaffold carries it, exactly as a
+  resin print does. Consequences, all of them load-bearing:
+  - Anything asking "where is the floor" means **z=0**, never `mesh.bounds[0][2]`. That is
+    `sampling.PLATE_Z`. Reading the floor off the mesh is what makes a lifted model's
+    underside look supported when it is hanging in mid-air.
+  - A lifted model's flat bottom is a 90 degree overhang like any other and gets contact
+    points across its whole footprint. On a grounded model it is printed against glass and
+    gets none. Both behaviours are pinned in `tests/test_sampling.py`.
+  - The lift is a property of the *model*, not of the supports, so stage 1 applies it
+    (`mesh_io.drop_to_bed(..., lift=)` / `mesh_io.set_lift`). The web session keeps the
+    posed mesh at z=0 as `Session.grounded` and floats a copy, so moving the slider is a
+    translation rather than another orientation search — but it does move every contact
+    point, so stage 2 has to re-run with it.
 - Geometry stages stay separate: `points` → `geometry` (with `orient` optional in front).
   The UI edits the point list between stages, so stage 3 must be cheap to re-run alone.
 - **The resin scaffold is the only support structure** (`resin.py`). It is an SLA support
-  system — contact tip, angled arm, thin vertical shaft, join cone, base, cross-links —
+  system — contact tip, angled arm, thin vertical shaft, base, cross-links —
   with FDM dimensions. There is no style selector: `supports.build_supports` builds this
   and nothing else. Do not add one back; the earlier organic-tree and plain-pillar
   generators were deliberately deleted rather than left switchable.
@@ -83,6 +100,11 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   `avoidance.AvoidanceField`; do not replace it with a local "is there something below me"
   test, which cannot answer either question. `tests/test_avoidance.py` pins the sweep and
   `tests/test_resin.py` pins the two guarantees it buys.
+- The base is a **disc, then a flare**, not a plain cone. A cone is at its full width for
+  exactly one layer, so what grips the glass is a ring of extrusion; the straight-walled
+  disc is the part that sticks, and with a lifted model the discs of neighbouring supports
+  overlap into what amounts to a raft. `supports.foot_profile` owns this and
+  `tests/test_resin.py::test_the_bases_of_a_lifted_model_overlap_into_a_raft` pins it.
 - A flat downward face is a 90° overhang wherever it is, including buried inside another
   support. That is why arm joins and tip undersides are built with `cap_bottom=False`
   rather than stacking capped primitives.
@@ -113,6 +135,7 @@ src/rsupport/
 ```bash
 python -m pytest
 python -m rsupport.cli supports samples/mini.stl -o out.stl
+python -m rsupport.cli supports samples/mini.stl -o out.stl --lift 0   # set it down instead
 python -m rsupport.web
 docker compose up -d   # same app, containerised, on :8000
 ```
