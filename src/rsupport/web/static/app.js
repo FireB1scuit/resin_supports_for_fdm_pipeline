@@ -217,6 +217,7 @@ function overrides() {
     brace_angle_deg: +$('braceangle').value,
     brace_headroom: +$('braceheadroom').value,
     brace_interval: +$('bracespacing').value,
+    brace_start_height: +$('bracestart').value,
     plate_only: $('plateonly').checked,
     strut_lean_deg: +$('lean').value,
     parenting: +$('parenting').value,
@@ -234,7 +235,8 @@ function syncSliders(p) {
                            ['baseh', 'foot_height'], ['bracethick', 'brace_diameter'],
                            ['bracespan', 'brace_max_span'],
                            ['braceheadroom', 'brace_headroom'],
-                           ['bracespacing', 'brace_interval']]) {
+                           ['bracespacing', 'brace_interval'],
+                           ['bracestart', 'brace_start_height']]) {
     if (p[key] != null) $(id).value = p[key];
   }
   // The link angle only exists inside the band that prints — 90 − limit up to
@@ -268,9 +270,10 @@ function showSliderValues() {
   $('braceangle_v').textContent = $('braceangle').value + '°';
   $('braceheadroom_v').textContent = (+$('braceheadroom').value).toFixed(1) + ' mm';
   $('bracespacing_v').textContent = (+$('bracespacing').value).toFixed(1) + ' mm';
+  $('bracestart_v').textContent = (+$('bracestart').value).toFixed(1) + ' mm';
 }
 ['tip', 'shaft', 'spacing', 'overhang', 'lean', 'parenting', 'lift', 'base', 'baseh',
- 'bracethick', 'bracespan', 'braceangle', 'braceheadroom', 'bracespacing']
+ 'bracethick', 'bracespan', 'braceangle', 'braceheadroom', 'bracespacing', 'bracestart']
   .forEach(id => $(id).addEventListener('input', showSliderValues));
 
 // ---------------------------------------------------------------- pipeline
@@ -484,7 +487,7 @@ $('tipstyle').addEventListener('change', () => rerun('geometry'));
 $('braces').addEventListener('change', () => rerun('geometry'));
 ['lean', 'parenting'].forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
 ['base', 'baseh'].forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
-['bracethick', 'bracespan', 'braceangle', 'braceheadroom', 'bracespacing']
+['bracethick', 'bracespan', 'braceangle', 'braceheadroom', 'bracespacing', 'bracestart']
   .forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
 // The lift moves the model, so the point list has to be placed again on top of
 // rebuilding the scaffold — see relift().

@@ -469,13 +469,33 @@ def test_the_link_angle_can_be_set_and_is_held_inside_the_printable_band():
 
 def test_a_steeper_link_angle_costs_span():
     """Rise is `span · tan angle`, so a steeper link needs more height for the
-    same reach. On short shafts that is the difference between a braced pair and
-    a bare one, which is why the default takes the shallowest angle going."""
-    model = mesh_io.drop_to_bed(table(bar_z=28.0))
-    points = ledge_grid(bar_z=28.0)
-    shallow = build_resin(model, points, PARAMS.with_(brace_angle_deg=90 - PARAMS.printable_overhang_deg))
-    steep = build_resin(model, points, PARAMS.with_(brace_angle_deg=PARAMS.printable_overhang_deg))
-    assert shallow.n_braces >= steep.n_braces
+    same reach, and a pair with a marginal window loses its link outright. That
+    is why the default takes the shallowest angle going.
+
+    The claim is about which pairs can be tied at all, not about the strut
+    count: how many rungs fit inside a window also depends on where the storey
+    grid happens to fall, and that moves with the angle too.
+    """
+    # A low ledge with the supports well spread: short shafts and long spans, so
+    # the windows are marginal and the angle decides. Tall shafts have height to
+    # spare and stay linked whatever it is set to.
+    model = mesh_io.drop_to_bed(table(bar_z=8.0))
+    shafts = plan(model, ledge_grid(bar_z=8.0, step=4.5))[0]
+    pos = np.array([sh.xy for sh in shafts])
+
+    def linkable(angle):
+        params = PARAMS.with_(brace_angle_deg=angle)
+        tan_a = math.tan(math.radians(link_angle(params)))
+        return sum(
+            _link_band(shafts[i], shafts[j], tan_a, params) is not None
+            for i, j in link_graph(pos, params)
+        )
+
+
+    limit = PARAMS.printable_overhang_deg
+    counts = [linkable(a) for a in (90 - limit, 90 - limit + 3, limit - 3, limit)]
+    assert counts == sorted(counts, reverse=True), counts
+    assert counts[0] > counts[-1], f"the angle should cost something: {counts}"
 
 
 def rung_heights(model, points, params):
@@ -602,6 +622,65 @@ def test_a_ladder_does_not_lose_a_rung_to_a_rounding_tie():
 
     kept = _rung_heights(storeys, storeys[0] - 1.0, storeys[-1] + spacing * 0.1, PARAMS)
     assert len(kept) == len(storeys), f"lost {len(storeys) - len(kept)} of {len(storeys)} rungs"
+
+
+def floating_field(lift: float, params=None):
+    """A wide flat overhang held `lift` off the plate, and the contacts under it.
+
+    Every shaft runs plate to underside, so they are all the same height — which
+    is the case a large lift produces and the case that used to break the
+    storeys.
+    """
+    params = (params or PARAMS).with_(lift_height=lift)
+    # Tall enough that the shafts can hold a printable diagonal even at lift 0;
+    # below that there is genuinely no vertical run to spend and no links at all.
+    model = mesh_io.drop_to_bed(table(bar_z=14.0), lift=lift)
+    points = ledge_grid(bar_z=14.0 + lift)
+    return model, points, params
+
+
+def lowest_link(model, points, params) -> float:
+    shafts = plan(model, points, params)[0]
+    ray = DownRay(model)
+    field = AvoidanceField(model, params, top_z=max(float(q.position[2]) for q in points))
+    links, _ = _link_shafts(field, ray, shafts, params)
+    assert links, "the scene should be cross-linked at all"
+    return min(float(m.vertices[:, 2].min()) for m in links)
+
+
+@pytest.mark.parametrize("lift", [0.0, 5.0, 12.0, 20.0])
+def test_the_links_reach_the_foot_of_the_scaffold_however_high_the_model_floats(lift):
+    """The storeys are stabbed from the pairs' windows, so when every shaft is
+    much of a height — exactly what a large lift gives, all of them running plate
+    to underside — the cover collapses to one storey in the *middle* of them. A
+    ladder counted from there leaves the whole lower half of every pillar bare,
+    and the taller the lift the more of it: at a 20 mm lift on the Templar the
+    lowest link sat 14.8 mm off the plate with the windows open from 1.5.
+
+    The foot of a pillar carries every bending moment above it, so it is the last
+    place to leave unbraced, whatever the lift is set to.
+    """
+    model, points, params = floating_field(lift)
+    floor = params.foot_height * 0.5  # the lowest a link may legally start
+    assert lowest_link(model, points, params) <= floor + params.brace_interval, (
+        f"at a {lift} mm lift the lowest link is "
+        f"{lowest_link(model, points, params):.1f} mm up, with the floor at {floor:.1f}"
+    )
+
+
+def test_links_start_where_the_start_height_says():
+    """`brace_start_height` is measured from the plate, not from wherever a shaft
+    happens to stand — "how far up do the links begin" is a question about the
+    scaffold, not about one shaft."""
+    model, points, params = floating_field(12.0)
+    for start in (0.0, 4.0, 9.0):
+        low = lowest_link(model, points, params.with_(brace_start_height=start))
+        assert low >= start - 1e-6, f"a link starts at {low:.1f}, below the {start} asked for"
+        # and it does not overshoot: raising the floor must not push the whole
+        # lattice up the pillar.
+        assert low <= start + params.brace_interval, (
+            f"start {start} pushed the lowest link all the way to {low:.1f}"
+        )
 
 
 def test_the_ladder_shares_its_heights_with_the_rest_of_the_field():

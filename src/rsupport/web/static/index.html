@@ -273,6 +273,11 @@
         <output id="braceangle_v"></output>
       </div>
       <div class="row">
+        <label for="bracestart">start height</label>
+        <input type="range" id="bracestart" min="0" max="20" step=".5">
+        <output id="bracestart_v"></output>
+      </div>
+      <div class="row">
         <label for="bracespacing">link spacing</label>
         <input type="range" id="bracespacing" min="2" max="20" step=".5">
         <output id="bracespacing_v"></output>
@@ -285,7 +290,9 @@
       <p style="color:var(--dim); font-size:11px; margin:2px 0 0">
         Shafts brace against the ones actually next to them, on heights the whole
         field shares. <b>Max span</b> is how far apart two may be and still be
-        linked. <b>Link spacing</b> is the height from one link to the next up
+        linked. <b>Start height</b> is how far up the scaffold the links begin,
+        measured from the plate; 0 starts them inside the feet, where they cost
+        nothing. <b>Link spacing</b> is the height from one link to the next up
         the same pair, so a tall pair gets a ladder of them and a short one gets
         a single rung. <b>Headroom</b> is clear air kept below the shaft tops —
         that is where the arms fan out to the model, so it is the space you need

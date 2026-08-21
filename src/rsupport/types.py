@@ -86,6 +86,12 @@ class SupportParams:
     brace_diameter: float = 0.8
     # Furthest apart two shafts may be and still be linked.
     brace_max_span: float = 12.0
+    # Height above the plate below which no cross-link is laid. 0 means "as low
+    # as the geometry allows", which is half a base height up — the links start
+    # inside the feet, where they cost nothing. Raise it to keep the bottom of
+    # the scaffold open: that is where the base discs have already merged into a
+    # raft and where a cutter has to get in first.
+    brace_start_height: float = 0.0
     # Clear air kept under the model: no link's top end comes within this of a
     # shaft's top, which is where that shaft's arms leave for their contacts. A
     # link crowded up against the arm fan is the one there is no room to get a

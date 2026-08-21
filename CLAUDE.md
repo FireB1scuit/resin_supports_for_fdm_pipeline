@@ -104,8 +104,8 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   bracing is even instead of going to whoever the loop reached first; and rung heights
   are a set of storeys shared by the whole field (`resin._link_storeys`): the minimal
   cover of every pair's window, so nothing has to fall off the grid to get braced, plus
-  a ladder at `brace_interval` above it, so a tall pair is tied all the way up instead
-  of twice near the plate. Both halves are field-wide grids — that is what keeps the
+  a ladder at `brace_interval`, **anchored at the bottom of the structure**, so a tall
+  pair is tied all the way up instead of twice near the plate. Both halves are field-wide grids — that is what keeps the
   links lined up, and why stacking rungs does not undo the arrangement.
   `tests/test_resin.py` pins each of those. Do not put back a
   per-shaft "nearest few neighbours" loop, and do not lay the storeys on a fixed grid —
@@ -123,9 +123,16 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   any, which is why the earlier passes cannot replace it. Judge changes here on the
   worst bare top run over the shafts taller than 10 mm — 10.9 mm on the Templar before
   this pass existed, 3.7 mm after, against a floor of `headroom + rise/2`.
-  `_rung_heights` may also put one rung off the grid, at a pair's own ceiling, when the
-  top storey it can reach is a full rung below what it could hold. That is the only
-  off-grid rung; do not add more.
+  `_rung_heights` may also put one rung off the grid at each end of a pair's window,
+  where the storey it can reach is a full rung short of its own floor or ceiling. Those
+  two are the only off-grid rungs; do not add more.
+- **Anchor the storey ladder at the bottom, never at the cover.** The cover is a
+  stabbing of the windows, so when every shaft is much of a height — which is what a
+  large `lift_height` gives you, all of them running plate to underside — it collapses
+  to one storey in the *middle*, and a ladder counted from there leaves the lower half
+  of every pillar bare. At a 20 mm lift on the Templar the lowest link sat 14.8 mm off
+  the plate with the windows open from 1.5. Judge changes here on the lowest rung at a
+  high lift, not just at the default 5 mm, where the bug barely shows.
 - **Compare rung spacings with a tolerance.** Storeys an exact `brace_interval` apart
   come out a few ulp short of it tens of millimetres up, and a bare `>=` then drops
   rungs from the middle and top of a ladder. It looks exactly like a deliberate cut-off

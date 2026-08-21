@@ -68,6 +68,12 @@ def _add_param_args(p: argparse.ArgumentParser) -> None:
         help="furthest apart two shafts may be and still be linked (mm)",
     )
     g.add_argument(
+        "--link-start",
+        type=float,
+        dest="brace_start_height",
+        help="height above the plate below which no cross-link is laid (mm)",
+    )
+    g.add_argument(
         "--link-spacing",
         type=float,
         dest="brace_interval",
@@ -118,6 +124,7 @@ def _params_from_args(args) -> SupportParams:
             "brace_diameter",
             "brace_max_span",
             "brace_interval",
+            "brace_start_height",
             "brace_headroom",
             "brace_angle_deg",
         )

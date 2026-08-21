@@ -169,6 +169,7 @@ Either edit rebuilds only the geometry, so it comes back in well under a second.
 | **link ø** | thickness of those struts | the lattice flexes (raise); it is fighting you at cleanup (lower) |
 | **max span** | furthest apart two shafts may be and still be linked | outlying shafts stand unbraced (raise); links are stretching across gaps you want left open (lower) |
 | **link spacing** | height from one link to the next up the *same* pair of shafts | tall pillars flex between their braces (lower, for more rungs); there is too much to cut off (raise) |
+| **start height** | how far up the scaffold the links begin, measured from the plate | the bottom of the lattice is tangled up with the raft, or you want the first cut to be an easy one (raise). 0 starts them inside the feet, where they cost nothing |
 | **link angle** | how steeply a link climbs, above horizontal | shallower spans further per millimetre of rise, steeper packs the lattice tighter. Only moves inside the band that prints — 40–50° at the default overhang limit — and is clamped there |
 | **headroom** | clear air kept below the shaft tops | you cannot get a blade in under the model (raise). It comes out of the height a link has to work with, so it drops links on short supports first |
 | **supports from plate only** | every support must reach the bed; one that cannot is left unheld and reported | leave it on. Unticking it only lets a blocked shaft stop where it is — supports that *start* on the model are not implemented yet |
@@ -265,6 +266,7 @@ Useful flags for `supports`:
 | `--link-thickness MM` | cross-link diameter |
 | `--link-span MM` | furthest apart two shafts may be and still be linked |
 | `--link-spacing MM` | height from one link to the next up the same pair |
+| `--link-start MM` | height above the plate below which no link is laid |
 | `--link-angle DEG` | how steeply a link climbs; clamped into the printable band |
 | `--link-headroom MM` | clear air left below the shaft tops |
 | `--allow-model-landings` | let a blocked shaft stop on the model instead of being refused |
@@ -671,13 +673,16 @@ window = [ max(land_z of both) + foot_height/2 ,  min(top_z of both) ]
 and the pair is linked only if the window is at least `rise` tall — a short
 support on a low overhang has no vertical run to spend and gets no link.
 
-Five things are adjustable here, and they all trade against that window.
+Six things are adjustable here, and they all trade against that window.
 `brace_max_span` caps `span`, and so caps `rise`. `brace_angle_deg` sets `a`,
 clamped into the band that prints (`90 − printable_overhang_deg` to
 `printable_overhang_deg`, so 40–50° by default); left unset it takes the
 shallowest angle there is, because that is the most span per millimetre of a
 scarce quantity. `brace_diameter` is the strut thickness. `brace_interval` is the height from one
-rung to the next up the same pair — see below. And `brace_headroom`
+rung to the next up the same pair — see below. `brace_start_height` lifts the
+floor of every window, measured from the plate rather than from wherever the
+shaft happens to stand, because "how far up do the links begin" is a question
+about the scaffold and not about one shaft. And `brace_headroom`
 takes the top off the window: a shaft's top is where its arms leave for their
 contacts, so a link that goes all the way up arrives in the middle of the arm
 fan, directly under the model — the busiest part of the scaffold and the worst
@@ -710,13 +715,23 @@ shaft left unbraced.
 
 That cover is minimal by construction — two heights held the whole sample mini —
 which is right for reaching everything and wrong for holding it. A pair of 40 mm
-pillars tied twice near the plate is a pair of stilts. So above the lowest storey
-the set carries on as a plain ladder at `brace_interval`, and a pair hangs a rung
-on every storey inside its window: one near the plate for a short support, all the
-way up for a tall one. A ladder rung landing within half an interval of a cover
-storey is dropped rather than doubled, and the floor under `brace_interval` is
-physical — two links closer than their own combined thickness are one lump with a
-hole in it, not two links.
+pillars tied twice near the plate is a pair of stilts. So the set also carries a
+plain ladder at `brace_interval`, and a pair hangs a rung on every storey inside
+its window: one near the plate for a short support, all the way up for a tall one.
+A ladder rung landing within half an interval of a cover storey is dropped rather
+than doubled, and the floor under `brace_interval` is physical — two links closer
+than their own combined thickness are one lump with a hole in it, not two links.
+
+**The ladder is anchored at the bottom of the structure and climbs**, the way
+scaffolding is built. Hanging it off the cover instead is the obvious thing and is
+wrong: the cover is a stabbing of the windows, so where the shafts are all much of
+a height — which is exactly what a large `lift_height` produces, every one of them
+standing from the plate to the model's underside — the windows are near enough
+identical, the cover collapses to a single storey in the *middle* of them, and a
+ladder counted from there leaves the whole lower half bare. At a 20 mm lift on the
+Templar that put the lowest link 14.8 mm off the plate with the windows open from
+1.5 mm, and the foot of a pillar is the last place to leave unbraced. Anchored at
+the bottom it is 1.5 mm.
 
 Because the ladder is one grid for the whole field, the extra rungs line up across
 it exactly as the cover storeys do; stacking links does not undo the arrangement.
@@ -757,12 +772,14 @@ for. Where nobody can do better, nothing happens. The same measurement is what
 the pass is judged on — worst bare top run on a shaft over 10 mm, 10.9 mm before
 and 3.7 mm after, against a floor of `headroom + rise/2`.
 
-One rung is allowed off the grid: a pair's ceiling is its own number and the
-storeys are the field's, so the highest storey a pair can reach may sit a whole
-rung below what it could actually hold. That shortfall lands on the one part of a
-pillar nothing above is holding, so where it is worth a rung, one goes at the
-ceiling. A top course following the roofline reads as deliberate in a way that a
-bare top does not.
+Two rungs are allowed off the grid, one at each end, and for the same reason: a
+pair's floor and ceiling are its own numbers and the storeys are the field's, so
+the highest and lowest storeys a pair can reach may each sit a whole rung short of
+what it could actually hold. Those shortfalls land on the two parts of a pillar
+nothing else is holding — the free top, and the foot that carries every bending
+moment above it — so where either gap is worth a rung, one goes at the boundary. A
+course following the roofline, or the plate, reads as deliberate in a way that a
+bare end does not.
 
 Each candidate link is tested against the model by sampling 10 interior points
 along it; both ends are left uncapped, since they are buried inside the shafts and

@@ -1063,6 +1063,9 @@ def _link_band(a: Shaft, b: Shaft, tan_a: float, params: SupportParams):
     Start half way up the bases rather than clear of them: on a short support
     that half a base height is the difference between a link and no link, and a
     link end buried in a base is buried in solid material, which costs nothing.
+    ``brace_start_height`` raises that floor, measured from the plate rather
+    than from where the shaft happens to stand, which is what "how far up the
+    scaffold do the links begin" means to somebody looking at it.
 
     Stop ``brace_headroom`` short of the shafts' tops. A shaft's top is where
     its arms leave for their contacts, so a link that goes all the way up
@@ -1071,7 +1074,10 @@ def _link_band(a: Shaft, b: Shaft, tan_a: float, params: SupportParams):
     into. Giving that back is the one thing the top of a link is worth.
     """
     rise = float(np.linalg.norm(b.xy - a.xy)) * tan_a
-    lo = max(a.land_z, b.land_z) + params.foot_height * 0.5
+    lo = max(
+        max(a.land_z, b.land_z) + params.foot_height * 0.5,
+        float(params.brace_start_height),
+    )
     hi = min(a.top_z, b.top_z) - params.brace_headroom
     if hi - lo < rise:
         return None  # no vertical run to spend; this pair gets no link
@@ -1137,17 +1143,29 @@ def _link_storeys(
     cover.sort()
 
     storeys = list(cover)
-    # Up to the highest a link could *ever* finish, not just the highest the
-    # pairs chosen so far reach. A shaft rescued later (:func:`_reach_higher`)
-    # can tie higher than anything in `bands`, and a storey that nothing ends up
-    # using costs nothing, while one that is missing cannot be added back.
+    # The ladder is anchored at the *bottom* of the structure and climbs, the way
+    # scaffolding is built. Hanging it off the cover instead is the obvious thing
+    # and is wrong: the cover is a stabbing of the windows, so where the shafts
+    # are all much of a height — which is exactly what a large `lift_height`
+    # produces, every one of them standing from the plate to the model's
+    # underside — the windows are near enough identical, the cover collapses to a
+    # single storey in the *middle* of them, and a ladder counted from there
+    # leaves the whole lower half bare. At a 20 mm lift on the Templar that put
+    # the lowest link 14.8 mm off the plate with the windows open from 1.5, and
+    # the foot of a pillar is the last place to leave unbraced.
+    #
+    # It runs to the highest a link could *ever* finish, not just the highest the
+    # pairs chosen so far reach — a shaft rescued later (:func:`_reach_higher`)
+    # ties higher than anything in `bands`. A storey nothing ends up using costs
+    # nothing; one that is missing cannot be added back.
     top = max(sh.top_z for sh in shafts) - params.brace_headroom
+    bottom = min(lo for lo, _ in bands)
     # Counted off the datum rather than accumulated. Adding `interval` to a
     # running total lets the rounding drift, and a rung spacing that comes out a
     # fraction under what was asked for is one a `>=` test rejects.
-    rungs = int((top - cover[0]) / interval) if top > cover[0] else 0
-    for k in range(1, min(rungs, _MAX_RUNGS * 4) + 1):
-        z = cover[0] + k * interval
+    rungs = int((top - bottom) / interval) if top > bottom else 0
+    for k in range(min(rungs, _MAX_RUNGS * 4) + 1):
+        z = bottom + k * interval
         # Half an interval is the closest a ladder rung may come to a storey the
         # cover already put there; nearer than that and they read as one thick
         # link rather than two.
@@ -1245,13 +1263,19 @@ def _rung_heights(storeys: np.ndarray, lo: float, hi: float, params: SupportPara
             kept.append(float(z))
         if len(kept) >= _MAX_RUNGS:
             break
+    # Anchor it at the bottom, for the same reason and more so: the grid is the
+    # field's and a pair's floor is its own, and the foot of a pillar carries
+    # every bending moment above it. A pair whose lowest storey is a full rung
+    # above where it could start gets one at the floor.
+    if kept and len(kept) < _MAX_RUNGS and kept[0] - lo >= spacing - _EPS:
+        kept.insert(0, float(lo))
     # Top it off. A pair's ceiling is its own number and the grid is the field's,
     # so the highest storey a pair can reach can sit a whole rung below what it
     # could actually hold — and that shortfall lands on the one part of a pillar
     # nothing above is holding. Where the gap is worth a rung, put one at the
-    # ceiling even though it is off the grid. It is the only rung allowed off it,
-    # and the top course of a scaffold following the roofline reads as
-    # deliberate in a way that a bare top does not.
+    # ceiling even though it is off the grid. Those two are the only rungs
+    # allowed off it, and a course following the roofline — or the plate — reads
+    # as deliberate in a way that a bare end does not.
     if kept and len(kept) < _MAX_RUNGS and hi - kept[-1] >= spacing - _EPS:
         kept.append(float(hi))
     return np.array(kept)
