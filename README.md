@@ -168,6 +168,7 @@ Either edit rebuilds only the geometry, so it comes back in well under a second.
 | **cross-links** | diagonal struts between slender shafts | turn off only if removal is a nightmare — they exist so tips can stay thin |
 | **link ø** | thickness of those struts | the lattice flexes (raise); it is fighting you at cleanup (lower) |
 | **max span** | furthest apart two shafts may be and still be linked | outlying shafts stand unbraced (raise); links are stretching across gaps you want left open (lower) |
+| **link spacing** | height from one link to the next up the *same* pair of shafts | tall pillars flex between their braces (lower, for more rungs); there is too much to cut off (raise) |
 | **link angle** | how steeply a link climbs, above horizontal | shallower spans further per millimetre of rise, steeper packs the lattice tighter. Only moves inside the band that prints — 40–50° at the default overhang limit — and is clamped there |
 | **headroom** | clear air kept below the shaft tops | you cannot get a blade in under the model (raise). It comes out of the height a link has to work with, so it drops links on short supports first |
 | **supports from plate only** | every support must reach the bed; one that cannot is left unheld and reported | leave it on. Unticking it only lets a blocked shaft stop where it is — supports that *start* on the model are not implemented yet |
@@ -263,6 +264,7 @@ Useful flags for `supports`:
 | `--no-braces` | drop the cross-links |
 | `--link-thickness MM` | cross-link diameter |
 | `--link-span MM` | furthest apart two shafts may be and still be linked |
+| `--link-spacing MM` | height from one link to the next up the same pair |
 | `--link-angle DEG` | how steeply a link climbs; clamped into the printable band |
 | `--link-headroom MM` | clear air left below the shaft tops |
 | `--allow-model-landings` | let a blocked shaft stop on the model instead of being refused |
@@ -669,12 +671,13 @@ window = [ max(land_z of both) + foot_height/2 ,  min(top_z of both) ]
 and the pair is linked only if the window is at least `rise` tall — a short
 support on a low overhang has no vertical run to spend and gets no link.
 
-Four things are adjustable here, and they all trade against that window.
+Five things are adjustable here, and they all trade against that window.
 `brace_max_span` caps `span`, and so caps `rise`. `brace_angle_deg` sets `a`,
 clamped into the band that prints (`90 − printable_overhang_deg` to
 `printable_overhang_deg`, so 40–50° by default); left unset it takes the
 shallowest angle there is, because that is the most span per millimetre of a
-scarce quantity. `brace_diameter` is the strut thickness. And `brace_headroom`
+scarce quantity. `brace_diameter` is the strut thickness. `brace_interval` is the height from one
+rung to the next up the same pair — see below. And `brace_headroom`
 takes the top off the window: a shaft's top is where its arms leave for their
 contacts, so a link that goes all the way up arrives in the middle of the arm
 fan, directly under the model — the busiest part of the scaffold and the worst
@@ -705,10 +708,33 @@ uncovered, put a storey at its top). Each storey then slides to the middle of th
 windows it covers. The mini's 153 links become 83, on **2** storeys, with no
 shaft left unbraced.
 
-A pair hangs a rung on every storey inside its window, thinned to one per
-`brace_interval` and capped at 6, so a tall pair gets a ladder and not a wall.
+That cover is minimal by construction — two heights held the whole sample mini —
+which is right for reaching everything and wrong for holding it. A pair of 40 mm
+pillars tied twice near the plate is a pair of stilts. So above the lowest storey
+the set carries on as a plain ladder at `brace_interval`, and a pair hangs a rung
+on every storey inside its window: one near the plate for a short support, all the
+way up for a tall one. A ladder rung landing within half an interval of a cover
+storey is dropped rather than doubled, and the floor under `brace_interval` is
+physical — two links closer than their own combined thickness are one lump with a
+hole in it, not two links.
+
+Because the ladder is one grid for the whole field, the extra rungs line up across
+it exactly as the cover storeys do; stacking links does not undo the arrangement.
 Every rung leans the same way — uphill toward increasing x — so a storey reads as
 a row rather than a scribble.
+
+`SupportBuild.n_braces`, and the **N links** in the UI, count *struts*. A pair
+tied at four heights is four links to look at and four to cut.
+
+**Serving the UI.** The static assets go out with `Cache-Control: no-cache`. The
+sidebar and the script that drives it are two files, this is a tool people leave
+open across restarts, and a browser left to its own freshness guess may pair a new
+`index.html` with a cached `app.js` — which puts controls on screen with nothing
+listening to them. They move, they show their value, and nothing happens, which
+looks exactly like a bug in the generator. `no-cache` still allows the 304, so it
+costs a conditional request per file per load. For the same reason `/api/supports`
+reports any override key the running server does not recognise, instead of
+letting `SupportParams.with_` drop it in silence.
 
 **Exceptions, in order.** A chosen pair can turn out unbuildable, because the
 model is in the way of every rung between them; and a tall shaft can be adjacent

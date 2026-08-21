@@ -140,3 +140,37 @@ def test_index_page_is_served(client):
     # The importmap is what lets the vendored addons resolve 'three' with no
     # bundler; if it goes missing the whole viewer silently fails to boot.
     assert 'type="importmap"' in body
+
+
+def test_the_ui_is_served_with_revalidation_forced(client):
+    """The sidebar and the script that drives it are separate files, and this is
+    a tool people leave open across restarts. Let a browser cache either one on
+    its own guess and it can pair a new index.html with a stale app.js, which
+    puts controls on screen with nothing listening to them: they move, they show
+    their value, and nothing happens. That is indistinguishable from a bug in
+    the generator, so the assets are served must-ask.
+    """
+    for path in ("/", "/app.js", "/index.html"):
+        assert client.get(path).headers.get("cache-control") == "no-cache", path
+
+
+def test_a_setting_this_server_has_never_heard_of_is_reported(client, stl_bytes):
+    """`with_` drops unknown keys, which is what lets the UI post the whole
+    control panel every time. It also means a page newer than the server it is
+    talking to gets silence back. Say so instead."""
+    sid = _upload(client, stl_bytes).json()["id"]
+    client.post(f"/api/points/{sid}", json={})
+    body = client.post(
+        f"/api/supports/{sid}", json={"overrides": {"brace_moon_phase": 3}}
+    ).json()
+    assert any("brace_moon_phase" in w for w in body["warnings"]), body["warnings"]
+
+
+def test_a_setting_this_server_does_know_is_not_reported(client, stl_bytes):
+    sid = _upload(client, stl_bytes).json()["id"]
+    client.post(f"/api/points/{sid}", json={})
+    body = client.post(
+        f"/api/supports/{sid}", json={"overrides": {"brace_interval": 4.0}}
+    ).json()
+    assert not any("does not know" in w for w in body["warnings"]), body["warnings"]
+    assert body["params"]["brace_interval"] == 4.0

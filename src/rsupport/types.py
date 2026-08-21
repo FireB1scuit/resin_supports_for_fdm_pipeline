@@ -51,7 +51,11 @@ class SupportParams:
     # 0 = one shaft per contact. 1 = arms reach far to share a shaft, so there
     # are far fewer shafts standing on the plate.
     parenting: float = 0.5
-    # Vertical spacing of the cross-links that tie shafts into a scaffold.
+    # Height from one cross-link to the next up the *same* pair of shafts. Two
+    # neighbouring pillars are tied at every multiple of this that fits between
+    # them, so a tall pair gets a ladder and a short one gets a single rung. The
+    # floor under it is physical: links closer together than their own combined
+    # thickness are one lump, not two links.
     brace_interval: float = 8.0
     # Polygon sides per lofted ring.
     ring_sections: int = 12
@@ -199,6 +203,7 @@ class SupportBuild:
 
     mesh: object  # trimesh.Trimesh — untyped to keep this module import-light
     n_points: int = 0
+    #: Cross-link struts built. A pair of shafts tied at four heights is four.
     n_braces: int = 0
     dropped: list[SupportPoint] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)

@@ -15,6 +15,7 @@ Four things are asserted here, in order of how much they matter:
 
 from __future__ import annotations
 
+import collections
 import itertools
 import math
 
@@ -472,6 +473,79 @@ def test_a_steeper_link_angle_costs_span():
     shallow = build_resin(model, points, PARAMS.with_(brace_angle_deg=90 - PARAMS.printable_overhang_deg))
     steep = build_resin(model, points, PARAMS.with_(brace_angle_deg=PARAMS.printable_overhang_deg))
     assert shallow.n_braces >= steep.n_braces
+
+
+def rung_heights(model, points, params):
+    """Every rung the field builds, as (pair, height of its lower end)."""
+    shafts = plan(model, points, params)[0]
+    tan_a = math.tan(math.radians(link_angle(params)))
+    ray = DownRay(model)
+    field = AvoidanceField(model, params, top_z=max(float(q.position[2]) for q in points))
+    edges = link_graph(np.array([sh.xy for sh in shafts]), params)
+    storeys = _link_storeys(shafts, edges, tan_a, params)
+    out = []
+    for i, j in edges:
+        for rung in _rungs(field, ray, shafts, i, j, tan_a, storeys, params):
+            out.append(((i, j), float(rung.vertices[:, 2].min())))
+    return out
+
+
+def tall_pair_points():
+    """A row of contacts high enough that the shafts under them have room for a
+    ladder rather than a single rung."""
+    return [down_point(float(x), 0.0, 34.0) for x in np.arange(3.0, 12.1, 3.0)]
+
+
+def test_two_shafts_are_tied_at_every_interval_up_their_height():
+    """A pair of 30 mm pillars braced once near the plate is a pair of stilts.
+    Where there is height for it they get a ladder, and `brace_interval` is the
+    rung spacing."""
+    model = mesh_io.drop_to_bed(solid_box())
+    points = tall_pair_points()
+    counts = {}
+    for interval in (4.0, 8.0, 16.0):
+        per_pair = collections.Counter(
+            pair for pair, _ in rung_heights(model, points, PARAMS.with_(brace_interval=interval))
+        )
+        assert per_pair, f"interval {interval} built nothing"
+        counts[interval] = max(per_pair.values())
+    assert counts[4.0] > counts[8.0] > counts[16.0], counts
+    assert counts[4.0] >= 3, f"a 30 mm pair at 4 mm spacing should be a ladder, got {counts}"
+
+
+def test_rungs_up_one_pair_keep_their_distance():
+    """Whatever the spacing asks for, two links closer together than their own
+    combined thickness are one lump with a hole in it."""
+    model = mesh_io.drop_to_bed(solid_box())
+    points = tall_pair_points()
+    for interval in (0.0, 4.0, 8.0):
+        params = PARAMS.with_(brace_interval=interval)
+        floor = max(interval, params.brace_diameter * 2.0)
+        by_pair: dict[tuple[int, int], list[float]] = {}
+        for pair, z in rung_heights(model, points, params):
+            by_pair.setdefault(pair, []).append(z)
+        for pair, zs in by_pair.items():
+            zs.sort()
+            gaps = np.diff(zs)
+            assert all(g >= floor - 1e-6 for g in gaps), (
+                f"pair {pair} at interval {interval} has rungs {np.round(gaps, 2)} apart"
+            )
+
+
+def test_the_ladder_shares_its_heights_with_the_rest_of_the_field():
+    """The extra rungs are a grid for the whole field, not a per-pair ladder —
+    otherwise stacking links would undo the arrangement that made them tidy."""
+    model = mesh_io.drop_to_bed(table(bar_z=28.0))
+    points = ledge_grid(bar_z=28.0)
+    shafts = plan(model, points, PARAMS)[0]
+    tan_a = math.tan(math.radians(link_angle(PARAMS)))
+    edges = link_graph(np.array([sh.xy for sh in shafts]), PARAMS)
+    storeys = _link_storeys(shafts, edges, tan_a, PARAMS)
+    assert len(storeys) >= 1
+    gaps = np.diff(storeys)
+    assert all(g > PARAMS.brace_interval * 0.5 - 1e-9 for g in gaps), (
+        f"storeys bunched up: {np.round(storeys, 2)}"
+    )
 
 
 def test_max_span_bounds_how_far_a_link_reaches():

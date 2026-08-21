@@ -102,8 +102,12 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   graph is planar and nothing reaches over a shaft standing in between; the
   neighbour cap is spent globally, shortest link first (`resin._choose_links`), so
   bracing is even instead of going to whoever the loop reached first; and rung heights
-  are the minimal set of storeys covering every pair's window (`resin._link_storeys`),
-  so the links line up. `tests/test_resin.py` pins each of those. Do not put back a
+  are a set of storeys shared by the whole field (`resin._link_storeys`): the minimal
+  cover of every pair's window, so nothing has to fall off the grid to get braced, plus
+  a ladder at `brace_interval` above it, so a tall pair is tied all the way up instead
+  of twice near the plate. Both halves are field-wide grids — that is what keeps the
+  links lined up, and why stacking rungs does not undo the arrangement.
+  `tests/test_resin.py` pins each of those. Do not put back a
   per-shaft "nearest few neighbours" loop, and do not lay the storeys on a fixed grid —
   the windows are narrow and a grid walks past most of them, which is the whole reason
   the heights are derived from the pairs.
@@ -163,6 +167,13 @@ If a push to `main` is ever attempted, stop and open a PR instead.
 - A flat downward face is a 90° overhang wherever it is, including buried inside another
   support. That is why arm joins and tip undersides are built with `cap_bottom=False`
   rather than stacking capped primitives.
+- **The UI is served `Cache-Control: no-cache`** (`web.app._RevalidatingStatic`), and
+  `/api/supports` reports override keys it does not recognise. Both exist for the same
+  failure: `index.html` and `app.js` are separate files and this is a tool people leave
+  open across restarts, so a browser is free to pair a new sidebar with a cached script
+  — controls on screen with no listeners on them, which move, show their value, and do
+  nothing. It is indistinguishable from a broken generator and cost a round of
+  debugging the wrong layer. Do not "optimise" the header away.
 - Run `pytest` before pushing.
 
 ## Layout

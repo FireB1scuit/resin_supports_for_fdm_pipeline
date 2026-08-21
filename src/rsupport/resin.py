@@ -93,8 +93,10 @@ _EPS = 1e-9
 #: neighbours, not struts: a ladder of rungs up one pair is still one neighbour.
 _LINKS_PER_SHAFT = 3
 
-#: Most rungs up any one pair of shafts, however tall they are.
-_MAX_RUNGS = 6
+#: Most rungs up any one pair of shafts, however tall they are. This is a
+#: backstop against a pathological setting, not the control: what actually sets
+#: how many rungs a pair gets is ``brace_interval``, the height between them.
+_MAX_RUNGS = 32
 
 
 @dataclass
@@ -838,7 +840,10 @@ def _link_shafts(field: AvoidanceField, ray: DownRay, shafts: list[Shaft], param
         if i not in braced or j not in braced:
             if build(i, j):
                 braced.update((i, j))
-    return parts, len(made)
+    # Struts, not pairs. A pair braced four times up its height is four links to
+    # look at and four to cut, and counting it once made every control over how
+    # many rungs there are report no change at all.
+    return parts, len(parts)
 
 
 def _reach_further(
@@ -1018,25 +1023,33 @@ def _link_storeys(
 
     Every pair used to start its own ladder from its own base, so on the sample
     mini the links landed at twenty distinct heights: correct, and visual
-    noise. One shared set of heights turns the same links into storeys —
-    each a row of struts at one level, all leaning the same way, which is what
+    noise. One shared set of heights turns the same links into storeys — each a
+    row of struts at one level, all leaning the same way, which is what
     scaffolding looks like and what makes it easy to read and to cut away.
 
-    A grid is the obvious way to get shared heights and the wrong one. Each
-    pair can only hold a link inside its own window of heights (:func:`_link_band`)
-    — generous on tall shafts, barely there on a short pair over a low overhang
-    — and a grid laid at ``brace_interval`` walks straight past the narrow ones,
-    which then have to fall off it again to get braced at all.
+    There are two things a set of storeys has to do, and they want different
+    answers, so it is built in two parts.
 
-    So take the heights from the windows instead. The tidiest scaffold is the
-    one covering every window with the *fewest distinct heights*, and that is a
-    stabbing problem with an exact greedy answer: sort the windows by their
-    top, and each time one is still uncovered put a storey at its top, which is
-    also the height reaching furthest into the windows still to come. Each
-    storey then slides to the middle of the windows it ended up covering — the
-    same count of them, but a link sits in its window rather than clinging to
-    the ceiling of it.
+    **Reach every pair.** Each pair can only hold a link inside its own window
+    of heights (:func:`_link_band`) — generous on tall shafts, barely there on a
+    short pair over a low overhang. A grid laid at ``brace_interval`` walks
+    straight past the narrow windows, and a pair that reaches no storey has to
+    fall off the grid to get braced at all. So the first storeys are taken *from*
+    the windows: the fewest heights that land inside every one of them, which is
+    a stabbing problem with an exact greedy answer — sort the windows by their
+    top, and each time one is still uncovered put a storey at its top, the
+    height that also reaches furthest into the windows still to come. Each then
+    slides to the middle of the windows it covers.
+
+    **Keep going up.** That cover is minimal by construction — two heights held
+    the whole sample mini — and a 40 mm pair braced twice near the plate is a
+    pair of stilts. So above the lowest storey the set continues as a plain
+    ladder at ``brace_interval``, and a tall pair takes every rung of it that
+    fits. The ladder is one grid for the whole field, so the extra rungs line up
+    across it exactly as the cover does; a ladder rung landing on top of a cover
+    storey is dropped rather than doubled.
     """
+    interval = _rung_spacing(params)
     bands = [
         band
         for band in (_link_band(shafts[i], shafts[j], tan_a, params) for i, j in edges)
@@ -1052,14 +1065,36 @@ def _link_storeys(
         if not levels or levels[-1] < lo:
             levels.append(hi)
 
-    settled = []
+    cover = []
     for z in levels:
         covered = [b for b in bands if b[0] <= z <= b[1]]
         middle = float(np.mean([(lo + hi) * 0.5 for lo, hi in covered]))
         floor = max(lo for lo, _ in covered)
         ceiling = min(hi for _, hi in covered)
-        settled.append(min(max(middle, floor), ceiling))
-    return np.array(sorted(settled))
+        cover.append(min(max(middle, floor), ceiling))
+    cover.sort()
+
+    storeys = list(cover)
+    top = max(hi for _, hi in bands)
+    z = cover[0] + interval
+    while z <= top + _EPS and len(storeys) < _MAX_RUNGS * 4:
+        # Half an interval is the closest a ladder rung may come to a storey the
+        # cover already put there; nearer than that and they read as one thick
+        # link rather than two.
+        if all(abs(z - c) > interval * 0.5 for c in cover):
+            storeys.append(z)
+        z += interval
+    return np.array(sorted(storeys))
+
+
+def _rung_spacing(params: SupportParams) -> float:
+    """Height between one rung and the next up the same pair of shafts.
+
+    ``brace_interval`` says what it should be. The floor under it is physical
+    rather than a matter of taste: two links closer together than their own
+    combined thickness are not two links, they are one lump with a hole in it.
+    """
+    return max(float(params.brace_interval), params.brace_diameter * 2.0)
 
 
 def _rungs(
@@ -1129,7 +1164,7 @@ def _rung_heights(storeys: np.ndarray, lo: float, hi: float, params: SupportPara
         nearest = float(min(storeys, key=lambda z: abs(z - (lo + hi) * 0.5)))
         return np.array([min(max(nearest, lo), hi)])
 
-    spacing = max(params.brace_interval, params.shaft_lower_diameter * 4.0)
+    spacing = _rung_spacing(params)
     kept: list[float] = []
     for z in inside:
         if not kept or z - kept[-1] >= spacing:

@@ -109,6 +109,17 @@ class SupportsRequest(ParamPatch):
     points: list[dict] | None = None  # None = use whatever stage 2 produced
 
 
+def _unknown_overrides(patch: ParamPatch) -> list[str]:
+    """Names in a patch that this build of SupportParams has never heard of.
+
+    ``with_`` ignores them, which is what makes the UI able to post the whole
+    control panel every time. It also means a browser talking to a server older
+    than itself gets silence: the control moves, the request succeeds, and the
+    value is dropped without a word. Report them so the log says so.
+    """
+    return sorted(set(patch.overrides) - set(SupportParams.__dataclass_fields__))
+
+
 def _resolve_params(session: Session, patch: ParamPatch) -> SupportParams:
     if patch.nozzle is not None:
         params = presets.from_nozzle(patch.nozzle)
@@ -285,6 +296,13 @@ def api_supports(sid: str, req: SupportsRequest) -> dict:
     build = supports_mod.build_supports(session.oriented, session.points, session.params)
     session.supports = build.mesh
     session.warnings = list(build.warnings)
+    if stale := _unknown_overrides(req):
+        session.warnings.insert(
+            0,
+            f"this server does not know the setting(s) {', '.join(stale)} — it is "
+            "older than the page talking to it, so those controls did nothing. "
+            "Restart it.",
+        )
     return {
         "elapsed": time.perf_counter() - t0,
         "points": len(session.points),
@@ -357,4 +375,26 @@ def api_export(sid: str, mode: str = "3mf") -> FileResponse:
     return FileResponse(path, filename=path.name, media_type="application/octet-stream")
 
 
-app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")
+class _RevalidatingStatic(StaticFiles):
+    """The UI, served so a browser always asks whether it is still current.
+
+    This is a local tool people leave open across restarts, and the sidebar and
+    the script that drives it are two separate files. Without a cache header a
+    browser may apply its own freshness guess to each of them independently, so
+    it is entitled to take the new index.html and keep the old app.js — which
+    puts controls on screen with no listeners attached to them. They move, they
+    show their value, and nothing happens, which looks exactly like a bug in the
+    generator and is impossible to guess at from the outside.
+
+    ``no-cache`` does not stop the file being cached, only being *used* without
+    asking. Every response still carries an etag, so the usual answer is a 304
+    and the cost is one conditional request per file per load.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.mount("/", _RevalidatingStatic(directory=STATIC, html=True), name="static")
