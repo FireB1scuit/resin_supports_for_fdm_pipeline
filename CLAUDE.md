@@ -115,6 +115,22 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   take a runner-up, and then reach past its own neighbours entirely
   (`resin._reach_further`), because a tall shaft in a thicket of stubs is exactly the
   one that needs a brace. Only a shaft with *nothing* gets either.
+  **Having links is not the same as being held.** A link finishes at the height of the
+  shorter shaft it ties, so a tall shaft among stubs is braced at its feet and free up
+  top — the half that flexes. `resin._reach_higher` is the final pass and asks the only
+  question that matters of every shaft: is anything holding the part that needs holding?
+  It measures against the shaft's *topmost existing rung*, not against whether it has
+  any, which is why the earlier passes cannot replace it. Judge changes here on the
+  worst bare top run over the shafts taller than 10 mm — 10.9 mm on the Templar before
+  this pass existed, 3.7 mm after, against a floor of `headroom + rise/2`.
+  `_rung_heights` may also put one rung off the grid, at a pair's own ceiling, when the
+  top storey it can reach is a full rung below what it could hold. That is the only
+  off-grid rung; do not add more.
+- **Compare rung spacings with a tolerance.** Storeys an exact `brace_interval` apart
+  come out a few ulp short of it tens of millimetres up, and a bare `>=` then drops
+  rungs from the middle and top of a ladder. It looks exactly like a deliberate cut-off
+  and cost a real debugging session. `tests/test_resin.py::test_a_ladder_does_not_lose_a_rung_to_a_rounding_tie`
+  pins it; generate grids as `datum + k * interval` rather than by accumulation.
   A link's top end answers to the **shorter** of the two shafts it ties, never to the
   one it is climbing — otherwise a link from a stub to a tower carries on up the tower
   past the stub's own arms with nothing under it. Every constructed test scene has

@@ -812,13 +812,22 @@ def _link_shafts(field: AvoidanceField, ray: DownRay, shafts: list[Shaft], param
     storeys = _link_storeys(shafts, chosen, tan_a, params)
 
     made: set[tuple[int, int]] = set()
+    # How high up each shaft anything has actually been tied. This is the thing
+    # a scaffold is judged on — not how many links a shaft has, but how much of
+    # it is left free above the topmost one.
+    reach = {i: shafts[i].land_z for i in range(len(shafts))}
 
     def build(i: int, j: int) -> bool:
+        if (min(i, j), max(i, j)) in made:
+            return False
         rungs = _rungs(field, ray, shafts, i, j, tan_a, storeys, params)
         if not rungs:
             return False
         parts.extend(rungs)
         made.add((min(i, j), max(i, j)))
+        top = max(float(r.vertices[:, 2].max()) for r in rungs)
+        reach[i] = max(reach[i], top)
+        reach[j] = max(reach[j], top)
         return True
 
     for i, j in chosen:
@@ -840,6 +849,11 @@ def _link_shafts(field: AvoidanceField, ray: DownRay, shafts: list[Shaft], param
         if i not in braced or j not in braced:
             if build(i, j):
                 braced.update((i, j))
+
+    # Having *a* link is not the same as being held. Now top up the shafts that
+    # are tied only near their feet.
+    for i, j in _reach_higher(pos, shafts, reach, tan_a, params):
+        build(i, j)
     # Struts, not pairs. A pair braced four times up its height is four links to
     # look at and four to cut, and counting it once made every control over how
     # many rungs there are report no change at all.
@@ -995,6 +1009,54 @@ def _choose_links(candidates: list[tuple[float, int, int]], n_shafts: int):
     return chosen, spare
 
 
+def _reach_higher(
+    pos: np.ndarray,
+    shafts: list[Shaft],
+    reach: dict[int, float],
+    tan_a: float,
+    params: SupportParams,
+) -> list[tuple[int, int]]:
+    """Pairs for a shaft left bare up its top end, worst first.
+
+    A link can only finish as high as the *shorter* of the two shafts it ties
+    (:func:`_link_band`), so a tall shaft standing in a thicket of stubs gets
+    braced to the top of the stubs and is free above that — which is the half
+    that flexes, and the half nothing else is holding. On the Templar the worst
+    of them stood 21 mm tall with its highest link at 10: braced, by the count,
+    and a diving board in fact.
+
+    :func:`_reach_further` does not catch this, because that shaft has three
+    perfectly good links and is not destitute. The question here is not "does it
+    have a link" but "is anything holding the part that needs holding", so the
+    test is against how high it is *already* tied: if some shaft within
+    ``brace_max_span`` could hold a link a rung's worth higher than that, it is
+    worth crossing the field for. Where nobody can do better, nothing happens.
+    """
+    kdt = cKDTree(pos)
+    spacing = _rung_spacing(params)
+    offers: list[tuple[float, int, int]] = []
+    for i, shaft in enumerate(shafts):
+        want = reach[i] + spacing
+        best: tuple[tuple[float, float, int], int] | None = None
+        for j in kdt.query_ball_point(pos[i], params.brace_max_span):
+            if j == i:
+                continue
+            band = _link_band(shaft, shafts[j], tan_a, params)
+            if band is None or band[1] < want:
+                continue
+            # Highest first — the point is the height. Nearest breaks the tie,
+            # because a short link is the tidier way to get there.
+            key = (-band[1], float(np.linalg.norm(pos[j] - pos[i])), j)
+            if best is None or key < best[0]:
+                best = (key, j)
+        if best is not None:
+            offers.append((shaft.top_z - reach[i], i, best[1]))
+    # Most bare shaft first, so if two of them want the same partner the one
+    # with more to lose gets it.
+    offers.sort(key=lambda o: (-o[0], o[1]))
+    return [(i, j) for _, i, j in offers]
+
+
 def _link_band(a: Shaft, b: Shaft, tan_a: float, params: SupportParams):
     """The heights a link between these two may be *centred* on.
 
@@ -1075,15 +1137,22 @@ def _link_storeys(
     cover.sort()
 
     storeys = list(cover)
-    top = max(hi for _, hi in bands)
-    z = cover[0] + interval
-    while z <= top + _EPS and len(storeys) < _MAX_RUNGS * 4:
+    # Up to the highest a link could *ever* finish, not just the highest the
+    # pairs chosen so far reach. A shaft rescued later (:func:`_reach_higher`)
+    # can tie higher than anything in `bands`, and a storey that nothing ends up
+    # using costs nothing, while one that is missing cannot be added back.
+    top = max(sh.top_z for sh in shafts) - params.brace_headroom
+    # Counted off the datum rather than accumulated. Adding `interval` to a
+    # running total lets the rounding drift, and a rung spacing that comes out a
+    # fraction under what was asked for is one a `>=` test rejects.
+    rungs = int((top - cover[0]) / interval) if top > cover[0] else 0
+    for k in range(1, min(rungs, _MAX_RUNGS * 4) + 1):
+        z = cover[0] + k * interval
         # Half an interval is the closest a ladder rung may come to a storey the
         # cover already put there; nearer than that and they read as one thick
         # link rather than two.
         if all(abs(z - c) > interval * 0.5 for c in cover):
             storeys.append(z)
-        z += interval
     return np.array(sorted(storeys))
 
 
@@ -1167,10 +1236,24 @@ def _rung_heights(storeys: np.ndarray, lo: float, hi: float, params: SupportPara
     spacing = _rung_spacing(params)
     kept: list[float] = []
     for z in inside:
-        if not kept or z - kept[-1] >= spacing:
+        # The tolerance is not decoration. Storeys an exact `spacing` apart come
+        # out a few ulp short of it once they are tens of millimetres up, so a
+        # bare `>=` throws away the rung at the top of a ladder — which looks,
+        # from the outside, exactly like the links giving up part way up a
+        # pillar. Nothing legitimate sits within a nanometre of the limit.
+        if not kept or z - kept[-1] >= spacing - _EPS:
             kept.append(float(z))
         if len(kept) >= _MAX_RUNGS:
             break
+    # Top it off. A pair's ceiling is its own number and the grid is the field's,
+    # so the highest storey a pair can reach can sit a whole rung below what it
+    # could actually hold — and that shortfall lands on the one part of a pillar
+    # nothing above is holding. Where the gap is worth a rung, put one at the
+    # ceiling even though it is off the grid. It is the only rung allowed off it,
+    # and the top course of a scaffold following the roofline reads as
+    # deliberate in a way that a bare top does not.
+    if kept and len(kept) < _MAX_RUNGS and hi - kept[-1] >= spacing - _EPS:
+        kept.append(float(hi))
     return np.array(kept)
 
 

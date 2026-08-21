@@ -744,6 +744,26 @@ runners-up, and then, failing that, may reach past its own neighbours to anythin
 within `brace_max_span` tall enough to hold it. Only a shaft with nothing at all
 is allowed either, so tidiness gives way exactly where it costs a brace.
 
+**Having links is not the same as being held.** A link finishes at the height of
+the *shorter* of the two shafts it ties, so a tall shaft in a thicket of stubs is
+braced to the top of the stubs and free above — the half that flexes, and the
+half nothing else is holding. On the Templar the worst of them stood 21 mm tall
+with its highest link at 10. The graph will never fix that on its own, because
+that shaft has three perfectly good links and is not destitute, so a final pass
+asks a different question of every shaft: *is anything holding the part that
+needs holding?* If some shaft within `brace_max_span` could hold a link a rung's
+worth higher than the topmost one it already has, it is worth crossing the field
+for. Where nobody can do better, nothing happens. The same measurement is what
+the pass is judged on — worst bare top run on a shaft over 10 mm, 10.9 mm before
+and 3.7 mm after, against a floor of `headroom + rise/2`.
+
+One rung is allowed off the grid: a pair's ceiling is its own number and the
+storeys are the field's, so the highest storey a pair can reach may sit a whole
+rung below what it could actually hold. That shortfall lands on the one part of a
+pillar nothing above is holding, so where it is worth a rung, one goes at the
+ceiling. A top course following the roofline reads as deliberate in a way that a
+bare top does not.
+
 Each candidate link is tested against the model by sampling 10 interior points
 along it; both ends are left uncapped, since they are buried inside the shafts and
 a cap there is a 90° overhang in the middle of solid plastic.

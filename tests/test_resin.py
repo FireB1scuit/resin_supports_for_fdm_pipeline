@@ -30,9 +30,12 @@ from rsupport.resin import (
     _LINKS_PER_SHAFT,
     _choose_links,
     _link_band,
+    _link_shafts,
     _link_storeys,
     _neighbour_candidates,
     _plan_shafts,
+    _rung_heights,
+    _rung_spacing,
     _rungs,
     build_resin,
     link_angle,
@@ -530,6 +533,75 @@ def test_rungs_up_one_pair_keep_their_distance():
             assert all(g >= floor - 1e-6 for g in gaps), (
                 f"pair {pair} at interval {interval} has rungs {np.round(gaps, 2)} apart"
             )
+
+
+def towers_and_stubs():
+    """Two tall contacts with a thicket of short ones between them, in clear air
+    beside a block. Each tower's actual neighbours are all stubs, so the only
+    thing that can brace its upper half is the other tower — which is not a
+    neighbour, and is exactly what the tidy graph would never pick."""
+    pts = [down_point(12.0, 0.0, 34.0), down_point(21.0, 0.0, 34.0)]
+    pts += [down_point(x, 0.0, 14.0) for x in (15.0, 18.0)]
+    pts += [down_point(x, 3.0, 14.0) for x in (13.5, 16.5, 19.5)]
+    return pts
+
+
+def highest_link(model, points, params):
+    """For each shaft, the height of the topmost link touching it."""
+    shafts = plan(model, points, params)[0]
+    tan_a = math.tan(math.radians(link_angle(params)))
+    ray = DownRay(model)
+    field = AvoidanceField(model, params, top_z=max(float(q.position[2]) for q in points))
+    links, _ = _link_shafts(field, ray, shafts, params)
+
+    reach = [-np.inf] * len(shafts)
+    for m in links:
+        v = m.vertices
+        top, bottom = float(v[:, 2].max()), float(v[:, 2].min())
+        for point, z in ((v[v[:, 2] > top - 1e-6][0], top), (v[v[:, 2] < bottom + 1e-6][0], bottom)):
+            near = int(np.argmin([np.linalg.norm(sh.xy_at(z) - point[:2]) for sh in shafts]))
+            reach[near] = max(reach[near], top)
+    return shafts, reach
+
+
+def test_a_tall_shaft_is_braced_near_its_top_not_only_at_its_feet():
+    """A link can only finish as high as the *shorter* of the two shafts it ties,
+    so a tall shaft standing in a thicket of stubs gets braced to the top of the
+    stubs and is free above that — the half that flexes, and the half nothing
+    else is holding. Having links is not the same as being held, so the test is
+    on where the topmost one is, not on how many there are.
+    """
+    model = mesh_io.drop_to_bed(solid_box())
+    shafts, reach = highest_link(model, towers_and_stubs(), PARAMS)
+
+    stubs = max(sh.top_z for sh in shafts if sh.height < 20.0)
+    towers = [i for i, sh in enumerate(shafts) if sh.height > 20.0]
+    assert len(towers) == 2, "the scene should stand two tall shafts"
+    for i in towers:
+        assert reach[i] > stubs + PARAMS.brace_interval, (
+            f"tower {i} is {shafts[i].top_z:.1f} mm tall and its highest link is at "
+            f"{reach[i]:.1f}, barely above the {stubs:.1f} mm stubs around it"
+        )
+
+
+def test_a_ladder_does_not_lose_a_rung_to_a_rounding_tie():
+    """Storeys an exact `brace_interval` apart come out a few ulp *short* of it
+    once they are tens of millimetres up. A bare `>=` against the spacing then
+    drops rungs out of the middle and the top of a ladder, which from the outside
+    looks precisely like the cross-links giving up part way up a pillar — and
+    reads as a decision the generator made rather than as arithmetic.
+    """
+    spacing = _rung_spacing(PARAMS)
+    heights = [3.3248727362960313]  # a real storey datum from the Templar
+    while len(heights) < 10:
+        heights.append(heights[-1] + spacing)
+    storeys = np.array(heights)
+
+    # The bug, stated: exact arithmetic says every gap is `spacing`.
+    assert not all(gap >= spacing for gap in np.diff(storeys)), "pick a datum that drifts"
+
+    kept = _rung_heights(storeys, storeys[0] - 1.0, storeys[-1] + spacing * 0.1, PARAMS)
+    assert len(kept) == len(storeys), f"lost {len(storeys) - len(kept)} of {len(storeys)} rungs"
 
 
 def test_the_ladder_shares_its_heights_with_the_rest_of_the_field():
