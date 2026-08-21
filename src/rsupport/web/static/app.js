@@ -224,6 +224,8 @@ function overrides() {
     lift_height: +$('lift').value,
     foot_diameter: +$('base').value,
     foot_height: +$('baseh').value,
+    join_cone_diameter: +$('cone').value,
+    join_cone_height: +$('coneh').value,
   };
 }
 
@@ -232,7 +234,8 @@ function syncSliders(p) {
   for (const [id, key] of [['tip', 'tip_diameter'], ['shaft', 'shaft_lower_diameter'],
                            ['spacing', 'support_spacing'], ['overhang', 'overhang_angle_deg'],
                            ['lift', 'lift_height'], ['base', 'foot_diameter'],
-                           ['baseh', 'foot_height'], ['bracethick', 'brace_diameter'],
+                           ['baseh', 'foot_height'], ['cone', 'join_cone_diameter'],
+                           ['coneh', 'join_cone_height'], ['bracethick', 'brace_diameter'],
                            ['bracespan', 'brace_max_span'],
                            ['braceheadroom', 'brace_headroom'],
                            ['bracespacing', 'brace_interval'],
@@ -265,6 +268,8 @@ function showSliderValues() {
   $('lift_v').textContent = (+$('lift').value).toFixed(1) + ' mm';
   $('base_v').textContent = (+$('base').value).toFixed(1) + ' mm';
   $('baseh_v').textContent = (+$('baseh').value).toFixed(1) + ' mm';
+  $('cone_v').textContent = (+$('cone').value).toFixed(1) + ' mm';
+  $('coneh_v').textContent = (+$('coneh').value).toFixed(1) + ' mm';
   $('bracethick_v').textContent = (+$('bracethick').value).toFixed(2) + ' mm';
   $('bracespan_v').textContent = (+$('bracespan').value).toFixed(1) + ' mm';
   $('braceangle_v').textContent = $('braceangle').value + '°';
@@ -273,6 +278,7 @@ function showSliderValues() {
   $('bracestart_v').textContent = (+$('bracestart').value).toFixed(1) + ' mm';
 }
 ['tip', 'shaft', 'spacing', 'overhang', 'lean', 'parenting', 'lift', 'base', 'baseh',
+ 'cone', 'coneh',
  'bracethick', 'bracespan', 'braceangle', 'braceheadroom', 'bracespacing', 'bracestart']
   .forEach(id => $(id).addEventListener('input', showSliderValues));
 
@@ -486,7 +492,7 @@ document.querySelectorAll('[data-toggle]').forEach(btn => {
 $('tipstyle').addEventListener('change', () => rerun('geometry'));
 $('braces').addEventListener('change', () => rerun('geometry'));
 ['lean', 'parenting'].forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
-['base', 'baseh'].forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
+['base', 'baseh', 'cone', 'coneh'].forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
 ['bracethick', 'bracespan', 'braceangle', 'braceheadroom', 'bracespacing', 'bracestart']
   .forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
 // The lift moves the model, so the point list has to be placed again on top of

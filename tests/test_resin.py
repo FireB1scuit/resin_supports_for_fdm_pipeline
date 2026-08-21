@@ -193,7 +193,7 @@ def test_geometry_never_enters_the_model():
     build = build_resin(model, bar_points(z=12.0), PARAMS)
     ray = DownRay(model)
     v = build.mesh.vertices
-    clear = v[(v[:, 2] > PARAMS.foot_height) & (v[:, 2] < 12.0 - PARAMS.tip_penetration * 2)]
+    clear = v[(v[:, 2] > PARAMS.base_height) & (v[:, 2] < 12.0 - PARAMS.tip_penetration * 2)]
     assert len(clear)
     assert not ray.inside(clear).any()
 
@@ -274,7 +274,7 @@ def test_a_shaft_never_thickens_into_a_trunk():
 
     v = build.mesh.vertices
     # Ignore the flared feet at the plate and the arms fanning out up top.
-    band = v[(v[:, 2] > PARAMS.foot_height * 2) & (v[:, 2] < 14.0 - PARAMS.tip_length * 3)]
+    band = v[(v[:, 2] > PARAMS.base_height * 2) & (v[:, 2] < 14.0 - PARAMS.tip_length * 3)]
     assert len(band)
     # Every ring in that band belongs to a shaft, so no ring may be wider than
     # the shaft's own bottom diameter.
@@ -661,7 +661,7 @@ def test_the_links_reach_the_foot_of_the_scaffold_however_high_the_model_floats(
     place to leave unbraced, whatever the lift is set to.
     """
     model, points, params = floating_field(lift)
-    floor = params.foot_height * 0.5  # the lowest a link may legally start
+    floor = params.base_height * 0.5  # the lowest a link may legally start
     assert lowest_link(model, points, params) <= floor + params.brace_interval, (
         f"at a {lift} mm lift the lowest link is "
         f"{lowest_link(model, points, params):.1f} mm up, with the floor at {floor:.1f}"

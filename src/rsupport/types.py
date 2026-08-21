@@ -123,6 +123,20 @@ class SupportParams:
     foot_diameter: float = 5.0
     foot_height: float = 2.0
 
+    # --- join cone ---
+    # The transition piece between the base disc and the shaft — "base -> join
+    # cone -> shaft" above. It used to be computed as a fraction of the disc's
+    # own width and height, so widening the base for more bed adhesion also
+    # puffed the cone out, and there was no way to size one without the other.
+    # They are independent sliders now: the disc is bed adhesion, the cone is
+    # what actually carries the shaft down onto it, and it is present at its
+    # own size whatever the disc is doing, including when the disc is turned
+    # off (`foot_height=0`). Clamped no wider than the disc it sits on — a cone
+    # wider than what it stands on would flare outward on its way up, which is
+    # an overhang.
+    join_cone_diameter: float = 5.0
+    join_cone_height: float = 1.0
+
     # --- placement ---
     # How far the whole model floats above the plate. This is what a resin
     # printer does — the sculpt hangs off the scaffold rather than being printed
@@ -144,6 +158,11 @@ class SupportParams:
         """Return a copy with fields overridden. Ignores unknown keys."""
         known = {k: v for k, v in kwargs.items() if k in self.__dataclass_fields__}
         return replace(self, **known)
+
+    @property
+    def base_height(self) -> float:
+        """Disc plus join cone: the full height of what a shaft stands on."""
+        return max(0.0, self.foot_height) + max(0.0, self.join_cone_height)
 
 
 @dataclass

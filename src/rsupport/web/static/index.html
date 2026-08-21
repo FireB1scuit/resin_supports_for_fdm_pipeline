@@ -323,6 +323,25 @@
     </section>
 
     <section>
+      <h2>join cone</h2>
+      <div class="row">
+        <label for="cone">cone &oslash;</label>
+        <input type="range" id="cone" min="0" max="15" step=".5">
+        <output id="cone_v"></output>
+      </div>
+      <div class="row">
+        <label for="coneh">cone height</label>
+        <input type="range" id="coneh" min="0" max="5" step=".1">
+        <output id="coneh_v"></output>
+      </div>
+      <p style="color:var(--dim); font-size:11px; margin:2px 0 0">
+        The piece between the base and the shaft. Sized on its own — it does
+        not grow or shrink with the base above, and it is still there even
+        with the base turned off.
+      </p>
+    </section>
+
+    <section>
       <h2>orientation</h2>
       <p style="color:var(--dim); font-size:11px; margin:0 0 8px">
         The model is used exactly as posed in the file, set down on the bed.

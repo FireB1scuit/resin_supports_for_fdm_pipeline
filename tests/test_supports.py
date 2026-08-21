@@ -248,7 +248,9 @@ def test_the_base_holds_its_full_width_for_a_real_distance():
     assert at_full_width.any()
     disc_top = float(v[at_full_width, 2].max())
     assert disc_top >= PARAMS.foot_height * 0.25, "the disc has no height; it is a cone"
-    assert disc_top < PARAMS.foot_height, "and it still has to flare in to the shaft"
+    # The disc itself is a full-width straight wall for its whole height now —
+    # the join cone (a separate slider) only starts narrowing above that.
+    assert disc_top == pytest.approx(PARAMS.foot_height, abs=1e-6)
 
 
 def test_base_size_is_exactly_what_was_asked_for():
@@ -256,7 +258,9 @@ def test_base_size_is_exactly_what_was_asked_for():
     params = PARAMS.with_(foot_diameter=9.0, foot_height=3.0)
     foot = make_foot([0, 0, 0], params)
     assert np.ptp(foot.bounds[:, 0]) == pytest.approx(9.0, rel=1e-6)
-    assert foot.bounds[1][2] == pytest.approx(3.0, abs=1e-9)
+    # The top of the whole assembly is the disc plus its (still default) join
+    # cone — the two heights add, they do not share a budget.
+    assert foot.bounds[1][2] == pytest.approx(params.base_height, abs=1e-6)
     assert foot.bounds[0][2] == pytest.approx(0.0, abs=1e-9)
     assert_printable(foot, params)
 
@@ -265,7 +269,41 @@ def test_a_base_narrower_than_its_shaft_degenerates_to_the_shaft():
     """The slider goes to zero, and zero has to mean something sane."""
     foot = make_foot([0, 0, 0], PARAMS.with_(foot_diameter=0.0))
     assert np.ptp(foot.bounds[:, 0]) == pytest.approx(PARAMS.shaft_lower_diameter, rel=1e-6)
-    assert len(make_foot([0, 0, 0], PARAMS.with_(foot_height=0.0)).faces) == 0
+
+
+def test_the_disc_and_the_join_cone_switch_off_independently():
+    """The two are independent sliders now: killing one must not kill the
+    other, and only killing both leaves nothing at all."""
+    both_off = PARAMS.with_(foot_height=0.0, join_cone_height=0.0)
+    assert len(make_foot([0, 0, 0], both_off).faces) == 0
+
+    disc_off = PARAMS.with_(foot_height=0.0)
+    foot = make_foot([0, 0, 0], disc_off)
+    assert len(foot.faces), "the join cone must still be built with the disc off"
+    assert foot.bounds[1][2] == pytest.approx(disc_off.join_cone_height, abs=1e-6)
+    assert np.ptp(foot.bounds[:, 0]) == pytest.approx(disc_off.join_cone_diameter, rel=1e-6)
+    assert_printable(foot, disc_off)
+
+    cone_off = PARAMS.with_(join_cone_height=0.0)
+    foot = make_foot([0, 0, 0], cone_off)
+    assert len(foot.faces), "the disc must still be built with the join cone off"
+    assert foot.bounds[1][2] == pytest.approx(cone_off.foot_height, abs=1e-6)
+    assert_printable(foot, cone_off)
+
+
+def test_the_join_cone_does_not_scale_with_the_base():
+    """The whole point of splitting them: widening or heightening the disc —
+    as long as it stays at least as wide as the cone — must not change the
+    cone sitting on top of it."""
+    small = PARAMS.with_(foot_diameter=6.0, foot_height=1.0)
+    big = PARAMS.with_(foot_diameter=12.0, foot_height=4.0)
+    for params in (small, big):
+        foot = make_foot([0, 0, 0], params)
+        cone_bottom_z = params.foot_height
+        near_cone_bottom = np.isclose(foot.vertices[:, 2], cone_bottom_z, atol=1e-4)
+        cone_r = float(np.linalg.norm(foot.vertices[near_cone_bottom][:, :2], axis=1).min())
+        assert cone_r == pytest.approx(params.join_cone_diameter * 0.5, rel=1e-6)
+        assert foot.bounds[1][2] == pytest.approx(params.base_height, abs=1e-6)
 
 
 # --------------------------------------------------------------------------- #
@@ -297,12 +335,25 @@ def test_ledge_support_lands_on_the_plate():
 
 def test_the_base_can_be_turned_off_entirely():
     model = table(bar_z=10.0)
-    params = PARAMS.with_(foot_height=0.0)
+    params = PARAMS.with_(foot_height=0.0, join_cone_height=0.0)
     build = build_supports(model, [down_point(5.0, 0.0, 10.0)], params)
 
     near_plate = build.mesh.vertices[build.mesh.vertices[:, 2] < 1e-9]
     width = 2 * np.linalg.norm(near_plate[:, :2] - np.array([5.0, 0.0]), axis=1).max()
     assert width == pytest.approx(params.shaft_lower_diameter, rel=1e-6)
+    assert_printable(build.mesh, params, model)
+
+
+def test_the_join_cone_survives_the_disc_being_turned_off():
+    """The disc and the join cone are independent controls — turning the
+    disc off must not take the cone down with it."""
+    model = table(bar_z=10.0)
+    params = PARAMS.with_(foot_height=0.0)
+    build = build_supports(model, [down_point(5.0, 0.0, 10.0)], params)
+
+    near_plate = build.mesh.vertices[build.mesh.vertices[:, 2] < 1e-9]
+    width = 2 * np.linalg.norm(near_plate[:, :2] - np.array([5.0, 0.0]), axis=1).max()
+    assert width == pytest.approx(params.join_cone_diameter, rel=1e-6)
     assert_printable(build.mesh, params, model)
 
 

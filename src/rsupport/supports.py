@@ -75,10 +75,11 @@ __all__ = [
 ]
 
 _EPS = 1e-9
-
-#: Most of the flare the base can afford, as a fraction of its height. The rest
-#: is straight-walled disc — see :func:`foot_profile`.
-FOOT_FLARE_SHARE = 0.5
+#: How far apart in z two rings that are meant to be a flat, (near-)instant
+#: step must be nudged, so :func:`_dedupe_rings` treats them as two rings
+#: rather than collapsing them into the wider one. Comfortably above its
+#: dedupe threshold and comfortably below any dimension a slider can express.
+_SHELF_STEP = 1e-7
 
 
 # --------------------------------------------------------------------------- #
@@ -227,8 +228,16 @@ class PathXY:
 # --------------------------------------------------------------------------- #
 
 
-def foot_profile(z0: float, height: float, r_bottom: float, r_top: float):
-    """The base: a straight-walled disc on the plate, then a flare to the shaft.
+def foot_profile(
+    z0: float,
+    disc_height: float,
+    r_bottom: float,
+    r_top: float,
+    cone_height: float = 0.0,
+    cone_diameter: float = 0.0,
+):
+    """The base: a straight-walled disc on the plate, then the join cone up to
+    the shaft. Two independent parts, not one shape derived from the other.
 
     The disc is the part that does the sticking. A base that starts at
     ``r_bottom`` and immediately tapers away has its full width for one layer
@@ -239,23 +248,61 @@ def foot_profile(z0: float, height: float, r_bottom: float, r_top: float):
     continuous raft that is far harder to knock off the plate than any number of
     separate feet.
 
-    The flare above it narrows going up, so like every profile here it is
-    self-supporting (``r' <= 0`` — see the module docstring). Degenerate cases
-    collapse gracefully: a base no wider than the shaft is a stub of shaft, and
-    a zero-height base is nothing at all.
+    The join cone above it narrows going up, so like every profile here it is
+    self-supporting (``r' <= 0`` — see the module docstring). It is sized by
+    ``cone_height``/``cone_diameter`` on their own terms, not as a fraction of
+    the disc: widening the disc for more bed adhesion must not puff the cone
+    out with it, and the cone still has to appear even where the disc has been
+    turned off entirely (``disc_height=0``). It is clamped no wider than
+    whatever it sits on, though — any wider and it would flare outward on its
+    way up, which is an overhang.
+
+    Degenerate cases collapse gracefully: a base no wider than the shaft is a
+    stub of shaft, a zero-height disc is nothing at all, and a zero-size cone
+    just leaves the disc to jump straight to the shaft's own width.
     """
     r_top = float(r_top)
     r_bottom = max(float(r_bottom), r_top)
-    height = float(height)
-    if height <= _EPS:
+    disc_height = max(0.0, float(disc_height))
+    cone_height = max(0.0, float(cone_height))
+    have_disc = disc_height > _EPS
+
+    cone_r = max(float(cone_diameter) * 0.5, r_top)
+    if have_disc:
+        # Only constrained by what it is actually standing on. Without a disc
+        # the cone answers to nobody but its own slider (and whatever room the
+        # caller already shrunk it to) — r_bottom is the disc's target width,
+        # not a ceiling on a part that is not there.
+        cone_r = min(cone_r, r_bottom)
+    have_cone = cone_height > _EPS and cone_r > r_top + _EPS
+
+    if not have_disc and not have_cone:
         return [(z0, r_top)]
-    # 45 degrees is the resin convention for the flare, but it does not always
-    # have the room, and the disc has first claim on the height: it is the half
-    # that earns the base its place.
-    flare = min(r_bottom - r_top, height * FOOT_FLARE_SHARE)
-    if flare <= _EPS:
-        return [(z0, r_bottom), (z0 + height, r_top)]
-    return [(z0, r_bottom), (z0 + height - flare, r_bottom), (z0 + height, r_top)]
+
+    profile: list[tuple[float, float]] = []
+    z = float(z0)
+    if have_disc:
+        profile.append((z, r_bottom))
+        z += disc_height
+        profile.append((z, r_bottom))
+        if have_cone and cone_r < r_bottom - _EPS:
+            # The cone starts narrower than the disc it stands on: a flat
+            # shoulder, nudged apart in z so it survives as a real step rather
+            # than the two rings landing on top of each other.
+            z += _SHELF_STEP
+            profile.append((z, cone_r))
+    else:
+        profile.append((z, cone_r if have_cone else r_top))
+
+    if have_cone:
+        z += cone_height
+        profile.append((z, r_top))
+    elif have_disc and r_bottom > r_top + _EPS:
+        # No cone at all: still have to reach the shaft's own width somehow,
+        # so the disc's top steps straight down to it.
+        z += _SHELF_STEP
+        profile.append((z, r_top))
+    return profile
 
 
 def tip_profile(contact_z: float, tip_len: float, params: SupportParams, base_r: float):
@@ -329,20 +376,27 @@ def make_foot(
 ) -> trimesh.Trimesh:
     """Bed adhesion. A bare shaft will not stay stuck to the plate, so a plate
     landing gets a ``params.foot_diameter`` disc, ``params.foot_height`` tall,
-    flaring up to the shaft. See :func:`foot_profile`.
+    then the join cone — ``params.join_cone_diameter``/``params.join_cone_height``
+    — up to the shaft. See :func:`foot_profile`.
     """
     base = np.asarray(base, dtype=np.float64)
     sections = sections or params.ring_sections
     r_bottom = params.foot_diameter * 0.5
     r_top = params.shaft_lower_diameter * 0.5
     if top is None:
-        top = base + np.array([0.0, 0.0, params.foot_height])
+        top = base + np.array([0.0, 0.0, params.base_height])
     top = np.asarray(top, dtype=np.float64)
     height = float(top[2] - base[2])
     if height <= _EPS:
         return trimesh.Trimesh()
+    # The disc has first claim on whatever height is available, same as it
+    # always has; the cone gets what is left.
+    disc_height = min(params.foot_height, height)
+    cone_height = min(params.join_cone_height, max(0.0, height - disc_height))
     axis = LineXY(base, top)
-    profile = foot_profile(float(base[2]), height, r_bottom, r_top)
+    profile = foot_profile(
+        float(base[2]), disc_height, r_bottom, r_top, cone_height, params.join_cone_diameter
+    )
     return mesh_rings(rings_on_axis(axis, profile), sections)
 
 

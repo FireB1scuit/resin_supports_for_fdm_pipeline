@@ -506,9 +506,13 @@ def _group_contacts(elbows: np.ndarray, points, params: SupportParams) -> list[n
 def _min_top(params: SupportParams) -> float:
     """Shortest a shaft may be and still be worth calling a shaft.
 
-    Its own base height: below that the whole shaft is buried inside the base
-    disc. Cross-links start half a base height up (see :func:`_link_shafts`), so
-    a shaft shorter than this cannot be braced at all.
+    Its own disc height: below that the whole shaft is buried inside the base
+    disc. This is a clustering heuristic, decided before any geometry exists,
+    so it only answers to the disc — the one part of the base that is fixed
+    width regardless of the shaft above it. The join cone always narrows to
+    the shaft's own width and gets squashed by the same budget the shaft's
+    height is squashed by (see :func:`_shaft_meshes`), so it does not add a
+    second floor here the way the disc does.
     """
     return max(0.0, float(params.foot_height))
 
@@ -1075,7 +1079,7 @@ def _link_band(a: Shaft, b: Shaft, tan_a: float, params: SupportParams):
     """
     rise = float(np.linalg.norm(b.xy - a.xy)) * tan_a
     lo = max(
-        max(a.land_z, b.land_z) + params.foot_height * 0.5,
+        max(a.land_z, b.land_z) + params.base_height * 0.5,
         float(params.brace_start_height),
     )
     hi = min(a.top_z, b.top_z) - params.brace_headroom
@@ -1349,9 +1353,14 @@ def link_angle(params: SupportParams) -> float | None:
 
 
 def _foot_radius(
-    shaft: Shaft, foot_h: float, field: AvoidanceField, params: SupportParams
+    shaft: Shaft, total_h: float, field: AvoidanceField, params: SupportParams, want: float
 ) -> float:
-    """The base disc, shrunk to whatever fits beside the model.
+    """``want``, shrunk to whatever fits beside the model.
+
+    Used for both the disc and the join cone — each may want a different
+    width (``params.foot_diameter`` / ``params.join_cone_diameter``), but they
+    occupy the same column, so both are checked against the same ``total_h``
+    (disc height plus join cone height) rather than their own slice of it.
 
     A base is much fatter than the shaft it sits under — 5 mm against 1.2 mm —
     and until shafts routed around obstacles it was never in a position where
@@ -1366,13 +1375,13 @@ def _foot_radius(
     is not: that fuses the support to the sculpt. So the disc keeps its full
     width wherever there is room, and gives up only as much as it must.
     """
-    want = params.foot_diameter * 0.5
+    want = float(want)
     floor = params.shaft_lower_diameter * 0.5
-    if foot_h <= _EPS or want <= floor:
+    if total_h <= _EPS or want <= floor:
         return want
 
-    # Every layer the disc actually occupies, not just the one it stands on.
-    top = field.layer_of(shaft.land_z + foot_h)
+    # Every layer the base actually occupies, not just the one it stands on.
+    top = field.layer_of(shaft.land_z + total_h)
     room = min(
         field.room(shaft.xy_at(field.heights[i]), i)
         for i in range(field.layer_of(shaft.land_z), max(top, 0) + 1)
@@ -1430,9 +1439,15 @@ def _shaft_meshes(
         # A support shorter than the base is not a reason to skip the base —
         # that support needs the adhesion most — but the base may not grow out
         # of the top of the shaft it is supposed to sit under, so it is squashed
-        # into whatever height there is.
-        foot_h = min(params.foot_height, max(0.0, shaft.top_z - z0 - params.layer_height))
-        profile = list(foot_profile(z0, foot_h, _foot_radius(shaft, foot_h, field, params), r_low))
+        # into whatever height there is. The disc keeps first claim on that
+        # height, same as it always has; the join cone gets what is left.
+        budget = max(0.0, shaft.top_z - z0 - params.layer_height)
+        foot_h = min(params.foot_height, budget)
+        cone_h = min(params.join_cone_height, max(0.0, budget - foot_h))
+        total_h = foot_h + cone_h
+        disc_r = _foot_radius(shaft, total_h, field, params, params.foot_diameter * 0.5)
+        cone_r = _foot_radius(shaft, total_h, field, params, params.join_cone_diameter * 0.5)
+        profile = list(foot_profile(z0, foot_h, disc_r, r_low, cone_h, cone_r * 2.0))
 
     if shaft.top_z > profile[-1][0] + _EPS:
         profile.append((float(shaft.top_z), r_up))

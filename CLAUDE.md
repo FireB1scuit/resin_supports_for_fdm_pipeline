@@ -182,11 +182,17 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   Supports that *start* on the model — a shaft rooted on the sculpt and branching from
   there — are **not implemented**; the UI checkbox says so. Do not quietly implement them
   behind the flag.
-- The base is a **disc, then a flare**, not a plain cone. A cone is at its full width for
-  exactly one layer, so what grips the glass is a ring of extrusion; the straight-walled
+- The base is a **disc, then a join cone**, not a plain cone. A cone is at its full width
+  for exactly one layer, so what grips the glass is a ring of extrusion; the straight-walled
   disc is the part that sticks, and with a lifted model the discs of neighbouring supports
   overlap into what amounts to a raft. `supports.foot_profile` owns this and
   `tests/test_resin.py::test_the_bases_of_a_lifted_model_overlap_into_a_raft` pins it.
+  The disc (`foot_diameter`/`foot_height`) and the join cone
+  (`join_cone_diameter`/`join_cone_height`, `SupportParams.base_height` is their sum) are
+  independent sliders, not one shape derived from the other — widening the disc for more
+  bed adhesion must not puff the cone out with it, and the cone still appears at its own
+  size when the disc is turned off (`foot_height=0`). The cone is clamped no wider than
+  whatever it is standing on, since anything wider would flare outward going up.
 - A flat downward face is a 90° overhang wherever it is, including buried inside another
   support. That is why arm joins and tip undersides are built with `cap_bottom=False`
   rather than stacking capped primitives.

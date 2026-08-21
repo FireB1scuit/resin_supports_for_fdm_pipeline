@@ -261,7 +261,7 @@ def test_a_support_routes_around_a_thin_blade_rather_than_balancing_on_it():
     # And having stepped aside, no part of it is inside the blade.
     ray = DownRay(fin)
     v = build.mesh.vertices
-    clear = v[(v[:, 2] > params.foot_height) & (v[:, 2] < 25.0 - params.tip_penetration * 2)]
+    clear = v[(v[:, 2] > params.base_height) & (v[:, 2] < 25.0 - params.tip_penetration * 2)]
     assert len(clear)
     assert not ray.inside(clear).any(), "the shaft routed around the blade, not through it"
 

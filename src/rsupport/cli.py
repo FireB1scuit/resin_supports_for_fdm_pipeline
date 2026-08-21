@@ -44,6 +44,19 @@ def _add_param_args(p: argparse.ArgumentParser) -> None:
         "--base-height", type=float, dest="foot_height", help="adhesion base height (mm)"
     )
     g.add_argument(
+        "--cone-width",
+        type=float,
+        dest="join_cone_diameter",
+        help="join cone diameter where it meets the base (mm); independent of --base-width",
+    )
+    g.add_argument(
+        "--cone-height",
+        type=float,
+        dest="join_cone_height",
+        help="join cone height, from the top of the base to the shaft (mm); "
+        "independent of --base-height",
+    )
+    g.add_argument(
         "--lean",
         type=float,
         dest="strut_lean_deg",
@@ -121,6 +134,8 @@ def _params_from_args(args) -> SupportParams:
             "lift_height",
             "foot_diameter",
             "foot_height",
+            "join_cone_diameter",
+            "join_cone_height",
             "brace_diameter",
             "brace_max_span",
             "brace_interval",
