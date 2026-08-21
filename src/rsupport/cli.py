@@ -56,6 +56,32 @@ def _add_param_args(p: argparse.ArgumentParser) -> None:
     )
     g.add_argument("--no-braces", action="store_true", help="disable diagonal cross-links")
     g.add_argument(
+        "--link-thickness",
+        type=float,
+        dest="brace_diameter",
+        help="cross-link diameter (mm)",
+    )
+    g.add_argument(
+        "--link-span",
+        type=float,
+        dest="brace_max_span",
+        help="furthest apart two shafts may be and still be linked (mm)",
+    )
+    g.add_argument(
+        "--link-headroom",
+        type=float,
+        dest="brace_headroom",
+        help="clear air left below the shaft tops, where the arms fan out to the "
+        "model; links stop this far short of it (mm)",
+    )
+    g.add_argument(
+        "--link-angle",
+        type=float,
+        dest="brace_angle_deg",
+        help="angle a cross-link is laid at, above horizontal (deg); clamped into "
+        "the printable band, and by default the shallowest angle in it",
+    )
+    g.add_argument(
         "--allow-model-landings",
         action="store_true",
         help="let a shaft stand on the model where the plate cannot be routed to "
@@ -83,6 +109,10 @@ def _params_from_args(args) -> SupportParams:
             "lift_height",
             "foot_diameter",
             "foot_height",
+            "brace_diameter",
+            "brace_max_span",
+            "brace_headroom",
+            "brace_angle_deg",
         )
     }
     overrides = {k: v for k, v in overrides.items() if v is not None}

@@ -166,12 +166,16 @@ Either edit rebuilds only the geometry, so it comes back in well under a second.
 | **overhang** | the angle at which a face is judged to need support | steep walls are being supported unnecessarily (lower) or a shallow slope droops (raise) |
 | **tip style** | conical or spherical contact | spherical snaps off cleaner but grips less |
 | **cross-links** | diagonal struts between slender shafts | turn off only if removal is a nightmare — they exist so tips can stay thin |
+| **link ø** | thickness of those struts | the lattice flexes (raise); it is fighting you at cleanup (lower) |
+| **max span** | furthest apart two shafts may be and still be linked | outlying shafts stand unbraced (raise); links are stretching across gaps you want left open (lower) |
+| **link angle** | how steeply a link climbs, above horizontal | shallower spans further per millimetre of rise, steeper packs the lattice tighter. Only moves inside the band that prints — 40–50° at the default overhang limit — and is clamped there |
+| **headroom** | clear air kept below the shaft tops | you cannot get a blade in under the model (raise). It comes out of the height a link has to work with, so it drops links on short supports first |
 | **supports from plate only** | every support must reach the bed; one that cannot is left unheld and reported | leave it on. Unticking it only lets a blocked shaft stop where it is — supports that *start* on the model are not implemented yet |
 | **base ø** | width of the disc each shaft stands on | supports peel off the plate mid-print (raise); the raft is welded to the bed and impossible to remove (lower) |
 | **base height** | how tall that disc is | the same trade, but height buys grip without eating more bed area |
 
-Changing **tip ø**, **shaft ø**, **tip style**, **cross-links**, **supports from
-plate only** or either **base**
+Changing **tip ø**, **shaft ø**, **tip style**, any of the **cross-link**
+controls, **supports from plate only** or either **base**
 dimension rebuilds geometry only, which is fast. Changing **spacing** or
 **overhang** re-decides where supports go, which takes a moment longer. Changing
 **lift** moves the model, so it redoes both. Sliders act on release, not on drag.
@@ -257,6 +261,10 @@ Useful flags for `supports`:
 | `--lean DEG` | how far a strut may lean off vertical |
 | `--parenting 0..1` | how many tips share a shaft |
 | `--no-braces` | drop the cross-links |
+| `--link-thickness MM` | cross-link diameter |
+| `--link-span MM` | furthest apart two shafts may be and still be linked |
+| `--link-angle DEG` | how steeply a link climbs; clamped into the printable band |
+| `--link-headroom MM` | clear air left below the shaft tops |
 | `--allow-model-landings` | let a blocked shaft stop on the model instead of being refused |
 | `--auto-orient` | re-pose first (off by default) |
 
@@ -660,6 +668,32 @@ window = [ max(land_z of both) + foot_height/2 ,  min(top_z of both) ]
 
 and the pair is linked only if the window is at least `rise` tall — a short
 support on a low overhang has no vertical run to spend and gets no link.
+
+Four things are adjustable here, and they all trade against that window.
+`brace_max_span` caps `span`, and so caps `rise`. `brace_angle_deg` sets `a`,
+clamped into the band that prints (`90 − printable_overhang_deg` to
+`printable_overhang_deg`, so 40–50° by default); left unset it takes the
+shallowest angle there is, because that is the most span per millimetre of a
+scarce quantity. `brace_diameter` is the strut thickness. And `brace_headroom`
+takes the top off the window: a shaft's top is where its arms leave for their
+contacts, so a link that goes all the way up arrives in the middle of the arm
+fan, directly under the model — the busiest part of the scaffold and the worst
+place to have to reach with a blade.
+
+The upper end of a link answers to the **shorter** of the two shafts. Letting it
+climb to the top of the one it is ascending sends a link from a stub to a tower
+straight on up the tower, past the stub's own arms, with nothing under its far
+end — worth six millimetres on the sample mini, and invisible on any test scene
+where the shafts are all much of a height.
+
+Headroom is deliberately 0 by default and deliberately not derived from the
+nozzle, which is the one place the usual rule does not hold. It is spent out of
+the window, and the window is set by how *tall* the shafts are, which is a
+property of the model. A coarser nozzle makes shafts fatter, not taller, so
+scaling headroom with it takes the same millimetres out of a shorter window:
+measured on the mini, one link diameter of headroom costs nothing at a 0.2
+nozzle and a third of the lattice at 0.4. How much room you want for a cutter is
+a judgement, so it is left to whoever is holding the cutters.
 
 Letting each pair start its own ladder from its own base is correct and looks
 like noise: on the sample mini it put 153 links at 20 distinct heights. A fixed

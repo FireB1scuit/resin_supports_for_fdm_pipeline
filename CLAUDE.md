@@ -91,7 +91,7 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   `supports.build_supports` imports `resin` *inside the function* — a top-level import
   would be circular.
 - Resin cross-links are horizontal; ours cannot be, because no FDM printer bridges a
-  horizontal strut hanging in air. `resin._link_angle` lays them at the shallowest angle
+  horizontal strut hanging in air. `resin.link_angle` lays them at the shallowest angle
   inside the printable band. Adapting resin conventions to what a nozzle can do is the
   point of the project, so make the adaptation and say why — do not copy the resin value
   and hope.
@@ -111,6 +111,18 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   take a runner-up, and then reach past its own neighbours entirely
   (`resin._reach_further`), because a tall shaft in a thicket of stubs is exactly the
   one that needs a brace. Only a shaft with *nothing* gets either.
+  A link's top end answers to the **shorter** of the two shafts it ties, never to the
+  one it is climbing — otherwise a link from a stub to a tower carries on up the tower
+  past the stub's own arms with nothing under it. Every constructed test scene has
+  shafts of much the same height, where the two are the same number, so this is pinned
+  on the sculpt in `tests/test_pipeline.py`.
+  `brace_headroom` is the one support dimension deliberately **not** derived from the
+  nozzle and deliberately 0 by default. It is spent out of a pair's window of linkable
+  height, and that window is set by shaft *height* — a property of the model. A coarser
+  nozzle makes shafts fatter, not taller, so nozzle-scaling it takes the same
+  millimetres out of a shorter window: measured, one link diameter of headroom costs
+  nothing at a 0.2 nozzle and a third of the lattice at 0.4. Do not "fix" that by
+  deriving it in `from_nozzle`.
 - **Nothing the generator builds may enter the model. This is a guarantee, not a
   preference**, and it covers every strut, not just the shafts:
   - A **shaft** is routed, not dropped. `resin._route_to_plate` walks the reachability

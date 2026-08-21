@@ -212,6 +212,10 @@ function overrides() {
     overhang_angle_deg: +$('overhang').value,
     tip_style: $('tipstyle').value,
     brace_enabled: $('braces').checked,
+    brace_diameter: +$('bracethick').value,
+    brace_max_span: +$('bracespan').value,
+    brace_angle_deg: +$('braceangle').value,
+    brace_headroom: +$('braceheadroom').value,
     plate_only: $('plateonly').checked,
     strut_lean_deg: +$('lean').value,
     parenting: +$('parenting').value,
@@ -226,9 +230,19 @@ function syncSliders(p) {
   for (const [id, key] of [['tip', 'tip_diameter'], ['shaft', 'shaft_lower_diameter'],
                            ['spacing', 'support_spacing'], ['overhang', 'overhang_angle_deg'],
                            ['lift', 'lift_height'], ['base', 'foot_diameter'],
-                           ['baseh', 'foot_height']]) {
+                           ['baseh', 'foot_height'], ['bracethick', 'brace_diameter'],
+                           ['bracespan', 'brace_max_span'],
+                           ['braceheadroom', 'brace_headroom']]) {
     if (p[key] != null) $(id).value = p[key];
   }
+  // The link angle only exists inside the band that prints — 90 − limit up to
+  // the limit itself — so the slider is given that range rather than a fixed
+  // one, and the server reports the angle actually in force.
+  if (p.printable_overhang_deg != null) {
+    $('braceangle').min = Math.round(90 - p.printable_overhang_deg);
+    $('braceangle').max = Math.round(p.printable_overhang_deg);
+  }
+  if (p.brace_angle_deg != null) $('braceangle').value = p.brace_angle_deg;
   $('tipstyle').value = p.tip_style;
   $('braces').checked = p.brace_enabled;
   if (p.plate_only != null) $('plateonly').checked = p.plate_only;
@@ -247,8 +261,13 @@ function showSliderValues() {
   $('lift_v').textContent = (+$('lift').value).toFixed(1) + ' mm';
   $('base_v').textContent = (+$('base').value).toFixed(1) + ' mm';
   $('baseh_v').textContent = (+$('baseh').value).toFixed(1) + ' mm';
+  $('bracethick_v').textContent = (+$('bracethick').value).toFixed(2) + ' mm';
+  $('bracespan_v').textContent = (+$('bracespan').value).toFixed(1) + ' mm';
+  $('braceangle_v').textContent = $('braceangle').value + '°';
+  $('braceheadroom_v').textContent = (+$('braceheadroom').value).toFixed(1) + ' mm';
 }
-['tip', 'shaft', 'spacing', 'overhang', 'lean', 'parenting', 'lift', 'base', 'baseh']
+['tip', 'shaft', 'spacing', 'overhang', 'lean', 'parenting', 'lift', 'base', 'baseh',
+ 'bracethick', 'bracespan', 'braceangle', 'braceheadroom']
   .forEach(id => $(id).addEventListener('input', showSliderValues));
 
 // ---------------------------------------------------------------- pipeline
@@ -462,6 +481,8 @@ $('tipstyle').addEventListener('change', () => rerun('geometry'));
 $('braces').addEventListener('change', () => rerun('geometry'));
 ['lean', 'parenting'].forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
 ['base', 'baseh'].forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
+['bracethick', 'bracespan', 'braceangle', 'braceheadroom']
+  .forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
 // The lift moves the model, so the point list has to be placed again on top of
 // rebuilding the scaffold — see relift().
 $('lift').addEventListener('change', relift);

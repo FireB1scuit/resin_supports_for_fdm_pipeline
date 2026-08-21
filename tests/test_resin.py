@@ -28,14 +28,22 @@ from rsupport.raycast import DownRay
 from rsupport.resin import (
     _LINKS_PER_SHAFT,
     _choose_links,
-    _link_angle,
     _link_band,
     _link_storeys,
     _neighbour_candidates,
     _plan_shafts,
+    _rungs,
     build_resin,
+    link_angle,
 )
-from test_supports import bracket, down_point, ledge_grid, printability_report, table
+from test_supports import (
+    bracket,
+    down_point,
+    ledge_grid,
+    printability_report,
+    solid_box,
+    table,
+)
 
 PARAMS = presets.from_nozzle(0.2)
 
@@ -395,6 +403,86 @@ def test_which_shaft_braces_which_does_not_depend_on_shaft_order():
     assert as_positions(link_graph(pos), pos) == as_positions(link_graph(shuffled), shuffled)
 
 
+def stubs_and_towers():
+    """Contacts alternating between just off the plate and far up, side by side,
+    in clear air beside a small block. Every link here ties a stub to a tower,
+    which is the case that tells the two shafts' tops apart."""
+    return [
+        down_point(float(x), 0.0, 16.0 if k % 2 else 30.0)
+        for k, x in enumerate(np.arange(12.0, 24.1, 3.0))
+    ]
+
+
+def link_tops(model, points, params):
+    """For every rung built, how far its upper end finished below the top of the
+    shorter shaft it ties. That is the gap under the model the links leave."""
+    shafts = plan(model, points, params)[0]
+    tan_a = math.tan(math.radians(link_angle(params)))
+    ray = DownRay(model)
+    field = AvoidanceField(model, params, top_z=max(float(q.position[2]) for q in points))
+    edges = link_graph(np.array([sh.xy for sh in shafts]), params)
+    storeys = _link_storeys(shafts, edges, tan_a, params)
+    gaps = []
+    for i, j in edges:
+        ceiling = min(shafts[i].top_z, shafts[j].top_z)
+        for rung in _rungs(field, ray, shafts, i, j, tan_a, storeys, params):
+            gaps.append(ceiling - float(rung.vertices[:, 2].max()))
+    return gaps
+
+
+@pytest.mark.parametrize(
+    "scene",
+    [
+        (lambda: (mesh_io.drop_to_bed(table(bar_z=28.0)), ledge_grid(bar_z=28.0))),
+        (lambda: (mesh_io.drop_to_bed(solid_box()), stubs_and_towers())),
+    ],
+    ids=["even field", "stubs and towers"],
+)
+def test_headroom_keeps_the_links_clear_of_the_arms(scene):
+    """A shaft's top is where its arms leave for the model, so a link that runs
+    all the way up lands in the middle of the arm fan, which is exactly where a
+    blade has to reach. `brace_headroom` is how much of that space to give back."""
+    model, points = scene()
+    for headroom in (0.0, 1.0, 3.0):
+        gaps = link_tops(model, points, PARAMS.with_(brace_headroom=headroom))
+        assert gaps, f"headroom {headroom} left no links at all"
+        assert min(gaps) >= headroom - 1e-6, (
+            f"a link came within {min(gaps):.2f} mm of a shaft top, asked for {headroom}"
+        )
+
+
+def test_the_link_angle_can_be_set_and_is_held_inside_the_printable_band():
+    """A link overhangs by `90 - angle` down its sides and by `angle` at its
+    ends, so only the band between the two prints at all. A value inside it is
+    taken as asked; one outside is pulled back to the edge rather than obeyed —
+    a support that needs supports is the one thing this generator may not make."""
+    limit = PARAMS.printable_overhang_deg
+    assert link_angle(PARAMS.with_(brace_angle_deg=None)) == pytest.approx(90 - limit + 2)
+    assert link_angle(PARAMS.with_(brace_angle_deg=46.0)) == pytest.approx(46.0)
+    assert link_angle(PARAMS.with_(brace_angle_deg=5.0)) == pytest.approx(90 - limit)
+    assert link_angle(PARAMS.with_(brace_angle_deg=85.0)) == pytest.approx(limit)
+
+
+def test_a_steeper_link_angle_costs_span():
+    """Rise is `span · tan angle`, so a steeper link needs more height for the
+    same reach. On short shafts that is the difference between a braced pair and
+    a bare one, which is why the default takes the shallowest angle going."""
+    model = mesh_io.drop_to_bed(table(bar_z=28.0))
+    points = ledge_grid(bar_z=28.0)
+    shallow = build_resin(model, points, PARAMS.with_(brace_angle_deg=90 - PARAMS.printable_overhang_deg))
+    steep = build_resin(model, points, PARAMS.with_(brace_angle_deg=PARAMS.printable_overhang_deg))
+    assert shallow.n_braces >= steep.n_braces
+
+
+def test_max_span_bounds_how_far_a_link_reaches():
+    """`brace_max_span` is the reach limit, and it is a hard one — no pair
+    further apart than this is even a candidate."""
+    pos = shaft_field()
+    for span in (4.0, 8.0):
+        for i, j in link_graph(pos, PARAMS.with_(brace_max_span=span)):
+            assert float(np.linalg.norm(pos[j] - pos[i])) <= span + 1e-9
+
+
 def test_the_whole_field_lays_its_links_on_a_few_shared_storeys():
     """Every pair used to start its own ladder from its own base, so the links
     ended up at as many heights as there were links. They share a handful of
@@ -403,7 +491,7 @@ def test_the_whole_field_lays_its_links_on_a_few_shared_storeys():
     one of them."""
     model = mesh_io.drop_to_bed(table(bar_z=28.0))
     shafts = plan(model, ledge_grid(bar_z=28.0))[0]
-    tan_a = math.tan(math.radians(_link_angle(PARAMS)))
+    tan_a = math.tan(math.radians(link_angle(PARAMS)))
     edges = link_graph(np.array([s.xy for s in shafts]))
     storeys = _link_storeys(shafts, edges, tan_a, PARAMS)
 

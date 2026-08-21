@@ -80,7 +80,28 @@ class SupportParams:
     # --- cross-links ---
     brace_enabled: bool = True
     brace_diameter: float = 0.8
+    # Furthest apart two shafts may be and still be linked.
     brace_max_span: float = 12.0
+    # Clear air kept under the model: no link's top end comes within this of a
+    # shaft's top, which is where that shaft's arms leave for their contacts. A
+    # link crowded up against the arm fan is the one there is no room to get a
+    # blade to, and it is right where the model is most delicate.
+    #
+    # Deliberately not derived from the nozzle, and deliberately 0 by default.
+    # It is spent out of a pair's window of linkable height, and that window is
+    # set by how tall the shafts are — a property of the model. A coarse nozzle
+    # makes shafts fatter, not taller, so scaling this with it takes the same
+    # millimetres out of a shorter window: measured on the sample mini, a
+    # headroom of one link diameter costs nothing at a 0.2 nozzle and a third
+    # of the lattice at 0.4. It is a judgement about how much room you want to
+    # get a cutter into, so it is left to whoever is holding the cutters.
+    brace_headroom: float = 0.0
+    # The angle a link is laid at, above horizontal. None takes the shallowest
+    # angle the printable band allows, which is the most horizontal span per
+    # millimetre of vertical run — and vertical run is what short shafts have
+    # least of. A set value is clamped into that band: outside it a link
+    # overhangs more than the printer can lay down.
+    brace_angle_deg: float | None = None
 
     # --- base ---
     # Bed adhesion, and the one part of the scaffold deliberately *not* derived

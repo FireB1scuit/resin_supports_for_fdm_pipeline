@@ -41,7 +41,7 @@ overhanging by ``a``. Both are printable only in the band
 ``[90 - printable, printable]`` — with the defaults, roughly 40 to 50 degrees.
 That is why links are placed at a *chosen* angle by picking the two attachment
 heights, instead of just connecting two convenient points. See
-``resin._link_angle``.
+``resin.link_angle``.
 
 Nothing here casts a general ray: ``rsupport.raycast.DownRay`` only does
 straight down, which is all this stage needs. A leaning strut's axis is still a

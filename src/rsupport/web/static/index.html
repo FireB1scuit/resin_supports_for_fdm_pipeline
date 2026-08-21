@@ -239,10 +239,6 @@
         </select>
       </div>
       <div class="row">
-        <label for="braces">cross-links</label>
-        <input type="checkbox" id="braces" checked>
-      </div>
-      <div class="row">
         <label for="plateonly">supports from plate only</label>
         <input type="checkbox" id="plateonly" checked>
       </div>
@@ -252,6 +248,44 @@
         propped off the sculpt. Supports that <em>start</em> on the model are
         not implemented yet, so unticking this only lets a blocked shaft stop
         where it is.
+      </p>
+    </section>
+
+    <section>
+      <h2>cross-links</h2>
+      <div class="row">
+        <label for="braces">cross-links</label>
+        <input type="checkbox" id="braces" checked>
+      </div>
+      <div class="row">
+        <label for="bracethick">link &oslash;</label>
+        <input type="range" id="bracethick" min=".3" max="2.5" step=".05">
+        <output id="bracethick_v"></output>
+      </div>
+      <div class="row">
+        <label for="bracespan">max span</label>
+        <input type="range" id="bracespan" min="2" max="25" step=".5">
+        <output id="bracespan_v"></output>
+      </div>
+      <div class="row">
+        <label for="braceangle">link angle</label>
+        <input type="range" id="braceangle" min="40" max="50" step="1">
+        <output id="braceangle_v"></output>
+      </div>
+      <div class="row">
+        <label for="braceheadroom">headroom</label>
+        <input type="range" id="braceheadroom" min="0" max="8" step=".1">
+        <output id="braceheadroom_v"></output>
+      </div>
+      <p style="color:var(--dim); font-size:11px; margin:2px 0 0">
+        Shafts brace against the ones actually next to them, on heights the whole
+        field shares. <b>Max span</b> is how far apart two may be and still be
+        linked. <b>Headroom</b> is clear air kept below the shaft tops — that is
+        where the arms fan out to the model, so it is the space you need a blade
+        in; it comes out of the height a link has to work with, so raising it
+        drops links on short supports first. <b>Link angle</b> only moves inside
+        the band that prints: shallower spans further per millimetre of rise,
+        steeper packs the lattice tighter where the shafts are tall.
       </p>
     </section>
 

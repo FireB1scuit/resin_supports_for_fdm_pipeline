@@ -84,7 +84,7 @@ from .supports import (
 )
 from .types import SupportBuild, SupportParams, SupportPoint
 
-__all__ = ["build_resin", "Shaft", "Arm"]
+__all__ = ["build_resin", "link_angle", "Shaft", "Arm"]
 
 _EPS = 1e-9
 
@@ -796,7 +796,7 @@ def _link_shafts(field: AvoidanceField, ray: DownRay, shafts: list[Shaft], param
     if not params.brace_enabled or len(shafts) < 2:
         return parts, 0
 
-    angle = _link_angle(params)
+    angle = link_angle(params)
     if angle is None:
         return parts, 0
     tan_a = math.tan(math.radians(angle))
@@ -996,10 +996,16 @@ def _link_band(a: Shaft, b: Shaft, tan_a: float, params: SupportParams):
     Start half way up the bases rather than clear of them: on a short support
     that half a base height is the difference between a link and no link, and a
     link end buried in a base is buried in solid material, which costs nothing.
+
+    Stop ``brace_headroom`` short of the shafts' tops. A shaft's top is where
+    its arms leave for their contacts, so a link that goes all the way up
+    arrives in the middle of the arm fan, directly under the model, which is
+    both the busiest place in the scaffold and the one hardest to get a blade
+    into. Giving that back is the one thing the top of a link is worth.
     """
     rise = float(np.linalg.norm(b.xy - a.xy)) * tan_a
     lo = max(a.land_z, b.land_z) + params.foot_height * 0.5
-    hi = min(a.top_z, b.top_z)
+    hi = min(a.top_z, b.top_z) - params.brace_headroom
     if hi - lo < rise:
         return None  # no vertical run to spend; this pair gets no link
     return lo + rise * 0.5, hi - rise * 0.5
@@ -1073,6 +1079,11 @@ def _rungs(
         return []
     lo, hi = band
     rise = float(np.linalg.norm(b.xy - a.xy)) * tan_a
+    # How high the *upper* end may finish. It answers to the shorter of the two
+    # shafts, not to the one being climbed: a link from a stub to a tower must
+    # stop where the stub stops, or it runs on up the tower past the stub's own
+    # arms with nothing under it.
+    ceiling = min(a.top_z, b.top_z) - params.brace_headroom
 
     levels = _rung_heights(storeys, lo, hi, params)
 
@@ -1080,7 +1091,7 @@ def _rungs(
     for centre in levels:
         # `_link_ends` solves the top end for itself, so a rung sits centred on
         # its storey only as closely as a routed shaft's lean allows.
-        ends = _link_ends(a, b, float(centre) - rise * 0.5, tan_a, b.top_z)
+        ends = _link_ends(a, b, float(centre) - rise * 0.5, tan_a, ceiling)
         if ends is None:
             continue
         p0, p1 = ends
@@ -1164,21 +1175,30 @@ def _link_ends(a: Shaft, b: Shaft, z: float, tan_a: float, hi: float):
     return p0, p1
 
 
-def _link_angle(params: SupportParams) -> float | None:
+def link_angle(params: SupportParams) -> float | None:
     """The angle a cross-link is laid at, above horizontal.
 
     A tilted strut overhangs by ``90 - angle`` along its sides and ``angle`` at
-    its ends, so it only prints inside the band between the two. Within that
-    band, take the *shallowest* angle available: every degree shallower is more
-    horizontal span for the same vertical run, and vertical run is the scarce
-    thing — supports on a low overhang are short, and a link that needs more
-    rise than the shafts have simply cannot be placed.
+    its ends, so it prints only inside the band between the two, and that band
+    is narrow: at the default 50 degree limit it is 40 to 50. Nothing outside it
+    is available at any price — a link laid flatter or steeper would need
+    supports of its own, which is the one thing this generator may not build.
+
+    ``brace_angle_deg`` chooses within the band and is clamped to it. Left None
+    it takes the *shallowest* angle there is, because every degree shallower is
+    more horizontal span for the same vertical run, and vertical run is the
+    scarce thing: supports on a low overhang are short, and a link needing more
+    rise than the shafts have cannot be placed at all. Steeper is worth asking
+    for when the shafts are tall and the lattice wants to be denser than the
+    span limit alone allows.
     """
     limit = float(params.printable_overhang_deg)
     lo, hi = 90.0 - limit, limit
     if lo > hi:
         return None
-    return float(min(lo + 2.0, hi))  # a couple of degrees of margin
+    if params.brace_angle_deg is None:
+        return float(min(lo + 2.0, hi))  # a couple of degrees of margin
+    return float(min(max(float(params.brace_angle_deg), lo), hi))
 
 
 # --------------------------------------------------------------------------- #

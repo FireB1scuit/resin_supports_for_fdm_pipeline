@@ -145,11 +145,27 @@ def _set_params(session: Session, patch: ParamPatch) -> SupportParams:
 app = FastAPI(title="resin supports for FDM", docs_url="/api/docs")
 
 
+def _params_payload(params: SupportParams) -> dict:
+    """A parameter set as the UI needs to see it.
+
+    ``brace_angle_deg`` is None until somebody sets it, meaning "the shallowest
+    angle that prints". A slider cannot show None, and the alternative — the
+    client working the angle out for itself — would put the printability rule in
+    two places. So report the angle actually in force, and let a moved slider
+    come back as an explicit value.
+    """
+    from .. import resin  # geometry imports stay lazy, as elsewhere in here
+
+    out = dict(vars(params))
+    out["brace_angle_deg"] = resin.link_angle(params)
+    return out
+
+
 @app.get("/api/presets")
 def api_presets() -> dict:
     return {
         "default": presets.DEFAULT_PRESET,
-        "presets": {name: vars(p) for name, p in presets.PRESETS.items()},
+        "presets": {name: _params_payload(p) for name, p in presets.PRESETS.items()},
     }
 
 
@@ -280,7 +296,7 @@ def api_supports(sid: str, req: SupportsRequest) -> dict:
         "dropped_points": _dropped_indices(session.points, build.dropped),
         "faces": int(len(build.mesh.faces)) if build.mesh is not None else 0,
         "warnings": session.warnings[:20],
-        "params": vars(session.params),
+        "params": _params_payload(session.params),
     }
 
 
