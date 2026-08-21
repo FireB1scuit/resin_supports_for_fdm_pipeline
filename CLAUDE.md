@@ -95,6 +95,22 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   inside the printable band. Adapting resin conventions to what a nozzle can do is the
   point of the project, so make the adaptation and say why — do not copy the resin value
   and hope.
+- **Which shaft braces which is a decision about the whole field, not about one shaft.**
+  A scaffold that holds the model up can still be miserable to look at and worse to cut
+  away, so the arrangement is an output in its own right. Neighbours come from a Delaunay
+  triangulation thinned by the Gabriel condition (`resin._neighbour_candidates`), so the
+  graph is planar and nothing reaches over a shaft standing in between; the
+  neighbour cap is spent globally, shortest link first (`resin._choose_links`), so
+  bracing is even instead of going to whoever the loop reached first; and rung heights
+  are the minimal set of storeys covering every pair's window (`resin._link_storeys`),
+  so the links line up. `tests/test_resin.py` pins each of those. Do not put back a
+  per-shaft "nearest few neighbours" loop, and do not lay the storeys on a fixed grid —
+  the windows are narrow and a grid walks past most of them, which is the whole reason
+  the heights are derived from the pairs.
+  Tidiness yields to structure and only in that order: a shaft left with nothing may
+  take a runner-up, and then reach past its own neighbours entirely
+  (`resin._reach_further`), because a tall shaft in a thicket of stubs is exactly the
+  one that needs a brace. Only a shaft with *nothing* gets either.
 - **Nothing the generator builds may enter the model. This is a guarantee, not a
   preference**, and it covers every strut, not just the shafts:
   - A **shaft** is routed, not dropped. `resin._route_to_plate` walks the reachability

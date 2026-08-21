@@ -623,21 +623,70 @@ the model, which is why that case ends in a tip too and gets reported in the log
 
 ### Cross-links
 
-For each shaft, neighbours within `brace_max_span`, nearest first, at most 3
-links each. With the link angle `a` fixed at 42°:
+A lattice that holds the model up can still be a mess to look at and worse to
+cut off, so *which* shaft braces which, and *at what height*, are decided for the
+whole field at once rather than shaft by shaft.
+
+**Which pairs.** Nearest-first bracing is the obvious rule and a bad one: it picks
+the same popular shaft from every side of a crowd, leaves the shaft on the far
+edge of it with nothing, and links two shafts straight over the top of a third
+standing between them. Instead:
+
+1. **Delaunay triangulation** of the shaft positions in plan. This is the graph
+   of shafts that are genuinely adjacent, it is planar — so no two links cross —
+   and it does not depend on the order the shafts arrived in.
+2. **Span filter**: longer than half the shaft and link diameters (below that
+   they are one column already), no longer than `brace_max_span`.
+3. **Gabriel filter**: drop a link if another shaft stands inside the circle
+   that has the link as its diameter. That shaft is nearer to both ends than
+   they are to each other, so the link is reaching over its head; two short
+   links through it brace the same pair better. This is also what trims
+   Delaunay's long thin border triangles.
+4. **Spend the cap globally**, shortest link first: a pair is taken while both
+   its shafts are under `_LINKS_PER_SHAFT` = 3 *neighbours* — neighbours, not
+   struts, so a tall pair with a four-rung ladder still counts once.
+5. **Reconnect**: a cap can cut a corner of the field adrift, so a second pass
+   over the runners-up puts back the shortest link across each remaining split.
+
+On an evenly spaced field that is the grid you would have drawn by hand.
+
+**At what height.** Each pair has a window of heights it can hold a link in, at
+link angle `a`:
 
 ```
 rise   = span · tan a
 window = [ max(land_z of both) + foot_height/2 ,  min(top_z of both) ]
 ```
 
-The pair is linked only if the window is at least `rise` tall — a short support
-on a low overhang simply has no vertical run to spend, and gets no link. Where
-there is room, links repeat every `brace_interval` up to 6 rungs, so a tall shaft
-gets a ladder. Each candidate link is tested against the model by sampling 10
-interior points along it; both ends are left uncapped, since they are buried
-inside the shafts and a cap there is a 90° overhang in the middle of solid
-plastic.
+and the pair is linked only if the window is at least `rise` tall — a short
+support on a low overhang has no vertical run to spend and gets no link.
+
+Letting each pair start its own ladder from its own base is correct and looks
+like noise: on the sample mini it put 153 links at 20 distinct heights. A fixed
+grid at `brace_interval` is not the fix either — the windows are narrow, and a
+grid walks straight past most of them. So the heights come *from* the windows:
+cover them all with the fewest distinct heights, which is a stabbing problem with
+an exact greedy answer (sort windows by their top; whenever one is still
+uncovered, put a storey at its top). Each storey then slides to the middle of the
+windows it covers. The mini's 153 links become 83, on **2** storeys, with no
+shaft left unbraced.
+
+A pair hangs a rung on every storey inside its window, thinned to one per
+`brace_interval` and capped at 6, so a tall pair gets a ladder and not a wall.
+Every rung leans the same way — uphill toward increasing x — so a storey reads as
+a row rather than a scribble.
+
+**Exceptions, in order.** A chosen pair can turn out unbuildable, because the
+model is in the way of every rung between them; and a tall shaft can be adjacent
+only to stubs, none of which is tall enough to hold a printable diagonal — which
+is the case that most needs bracing. A shaft left with nothing therefore gets the
+runners-up, and then, failing that, may reach past its own neighbours to anything
+within `brace_max_span` tall enough to hold it. Only a shaft with nothing at all
+is allowed either, so tidiness gives way exactly where it costs a brace.
+
+Each candidate link is tested against the model by sampling 10 interior points
+along it; both ends are left uncapped, since they are buried inside the shafts and
+a cap there is a 90° overhang in the middle of solid plastic.
 
 ### Profiles that can never need support
 

@@ -15,6 +15,9 @@ Four things are asserted here, in order of how much they matter:
 
 from __future__ import annotations
 
+import itertools
+import math
+
 import numpy as np
 import pytest
 import trimesh
@@ -22,8 +25,17 @@ import trimesh
 from rsupport import mesh_io, presets, sampling
 from rsupport.avoidance import AvoidanceField
 from rsupport.raycast import DownRay
-from rsupport.resin import _plan_shafts, build_resin
-from test_supports import bracket, down_point, printability_report, table
+from rsupport.resin import (
+    _LINKS_PER_SHAFT,
+    _choose_links,
+    _link_angle,
+    _link_band,
+    _link_storeys,
+    _neighbour_candidates,
+    _plan_shafts,
+    build_resin,
+)
+from test_supports import bracket, down_point, ledge_grid, printability_report, table
 
 PARAMS = presets.from_nozzle(0.2)
 
@@ -271,6 +283,138 @@ def test_cross_links_can_be_switched_off():
     model = mesh_io.drop_to_bed(table(bar_z=28.0))
     build = build_resin(model, bar_points(z=28.0), PARAMS.with_(brace_enabled=False))
     assert build.n_braces == 0
+
+
+# --------------------------------------------------------------------------- #
+# 3b. and it is a tidy one: which shaft braces which, and at what height
+# --------------------------------------------------------------------------- #
+#
+# A lattice can hold a model up and still be a mess to look at and worse to cut
+# away. These pin the arrangement itself: neighbours are the shafts actually
+# next to each other, the bracing is spread evenly instead of going to whoever
+# asked first, and the rungs line up into storeys.
+
+
+def shaft_field(n: int = 6, step: float = 3.0, jitter: float = 0.35) -> np.ndarray:
+    """A patch of shaft positions — a grid, nudged so nothing is exactly
+    cocircular and the triangulation has to make real choices."""
+    rng = np.random.default_rng(7)
+    grid = np.array([(x * step, y * step) for x in range(n) for y in range(n)], dtype=float)
+    return grid + rng.uniform(-jitter, jitter, grid.shape)
+
+
+def link_graph(pos: np.ndarray, params=None) -> list[tuple[int, int]]:
+    """Which shaft the scaffold would tie to which, over these positions."""
+    params = params or PARAMS
+    chosen, _ = _choose_links(_neighbour_candidates(pos, params), len(pos))
+    return chosen
+
+
+def _crosses(a, b, c, d) -> bool:
+    def side(o, p, q):
+        return (p[0] - o[0]) * (q[1] - o[1]) - (p[1] - o[1]) * (q[0] - o[0])
+
+    return (side(c, d, a) > 0) != (side(c, d, b) > 0) and (side(a, b, c) > 0) != (
+        side(a, b, d) > 0
+    )
+
+
+def test_no_two_cross_links_cross():
+    """The graph is planar in plan view. Struts that cross each other in mid-air
+    are the single loudest way a scaffold looks thrown together."""
+    pos = shaft_field()
+    edges = link_graph(pos)
+    for (a, b), (c, d) in itertools.combinations(edges, 2):
+        if len({a, b, c, d}) < 4:
+            continue
+        assert not _crosses(pos[a], pos[b], pos[c], pos[d]), (
+            f"links {a}-{b} and {c}-{d} cross"
+        )
+
+
+def test_a_link_never_reaches_over_a_shaft_standing_between():
+    """Nearest-first bracing happily ties two shafts together straight over the
+    top of a third. Two short links through that third one brace the same pair
+    better and look like they belong there."""
+    pos = shaft_field()
+    for i, j in link_graph(pos):
+        mid = (pos[i] + pos[j]) * 0.5
+        radius = float(np.linalg.norm(pos[j] - pos[i])) * 0.5
+        for k in range(len(pos)):
+            if k in (i, j):
+                continue
+            assert np.linalg.norm(pos[k] - mid) >= radius * (1.0 - 1e-6), (
+                f"link {i}-{j} reaches over shaft {k}"
+            )
+
+
+def test_bracing_is_spread_evenly_and_leaves_nobody_out():
+    """The old per-shaft greed gave the first shafts in the list their three
+    best neighbours each and left a twelfth of the field with nothing. The cap
+    is spent over the whole field instead, so every shaft gets a share."""
+    pos = shaft_field()
+    edges = link_graph(pos)
+    degree = np.zeros(len(pos), dtype=int)
+    for i, j in edges:
+        degree[i] += 1
+        degree[j] += 1
+    assert degree.min() >= 1, "no shaft may be left unbraced when it has neighbours"
+    # The cap is on neighbours; the connectivity pass may spend one over it to
+    # avoid cutting a corner of the field adrift.
+    assert degree.max() <= _LINKS_PER_SHAFT + 1
+
+
+def test_the_lattice_is_one_connected_structure():
+    """A brace that ties two shafts to each other and to nothing else is not a
+    scaffold. Every shaft within reach of the rest is part of the same one."""
+    pos = shaft_field()
+    seen = {0}
+    stack = [0]
+    neighbours: dict[int, list[int]] = {i: [] for i in range(len(pos))}
+    for i, j in link_graph(pos):
+        neighbours[i].append(j)
+        neighbours[j].append(i)
+    while stack:
+        for nxt in neighbours[stack.pop()]:
+            if nxt not in seen:
+                seen.add(nxt)
+                stack.append(nxt)
+    assert len(seen) == len(pos)
+
+
+def test_which_shaft_braces_which_does_not_depend_on_shaft_order():
+    """Shafts arrive in whatever order the contacts were sampled in. That is not
+    a property of the model, so it must not show up in the scaffold."""
+    pos = shaft_field()
+    order = np.random.default_rng(3).permutation(len(pos))
+    shuffled = pos[order]
+
+    def as_positions(edges, table):
+        return {frozenset((tuple(np.round(table[i], 9)), tuple(np.round(table[j], 9)))) for i, j in edges}
+
+    assert as_positions(link_graph(pos), pos) == as_positions(link_graph(shuffled), shuffled)
+
+
+def test_the_whole_field_lays_its_links_on_a_few_shared_storeys():
+    """Every pair used to start its own ladder from its own base, so the links
+    ended up at as many heights as there were links. They share a handful of
+    heights now, and — the point of choosing those heights from the pairs
+    rather than off a fixed grid — every pair with room for a link can reach
+    one of them."""
+    model = mesh_io.drop_to_bed(table(bar_z=28.0))
+    shafts = plan(model, ledge_grid(bar_z=28.0))[0]
+    tan_a = math.tan(math.radians(_link_angle(PARAMS)))
+    edges = link_graph(np.array([s.xy for s in shafts]))
+    storeys = _link_storeys(shafts, edges, tan_a, PARAMS)
+
+    assert 0 < len(storeys) <= 6, "a field this size should not need many storeys"
+    for i, j in edges:
+        band = _link_band(shafts[i], shafts[j], tan_a, PARAMS)
+        if band is None:
+            continue  # too short to hold a printable diagonal at all
+        assert any(band[0] <= z <= band[1] for z in storeys), (
+            f"shafts {i}-{j} can hold a link but no storey is within reach"
+        )
 
 
 # --------------------------------------------------------------------------- #
