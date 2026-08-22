@@ -35,6 +35,17 @@ which gives three design rules used throughout:
   other. Where two parts genuinely do meet, the buried cap is suppressed with
   ``cap_bottom=False`` rather than left face to face with its neighbour.
 
+The one thing that is exempt from all of it is :func:`make_joint`, the ball
+dropped on a junction to give the slicer something solid to make the corner out
+of. Its underside *is* a 90 degree overhang and it does not matter, because the
+ball is inscribed in the pillar: there is shaft under every one of those faces,
+so nothing is being asked to print in mid-air. That is the one place in this
+module where "buried" is a real defence, and it holds only because the ball is
+sized and centred so that it can never poke out. Everywhere else, buried
+downward faces are still suppressed — a strut's end cap is buried in the same
+sense and is still removed, because a strut is not guaranteed to be inside
+anything.
+
 Cross-links are the exception that proves the rule: a plain strut at angle ``a``
 above horizontal has side walls overhanging by ``90 - a`` and end caps
 overhanging by ``a``. Both are printable only in the band
@@ -65,6 +76,7 @@ __all__ = [
     "make_tip",
     "make_foot",
     "make_strut",
+    "make_joint",
     "mesh_rings",
     "rings_on_axis",
     "foot_profile",
@@ -427,6 +439,42 @@ def make_strut(
     return mesh_rings(
         rings_on_axis(axis, profile), sections or params.ring_sections, cap_bottom, cap_top
     )
+
+
+def make_joint(
+    centre,
+    radius: float,
+    subdivisions: int = 1,
+) -> trimesh.Trimesh:
+    """A ball buried at a junction, so the corner there is a solid, not a seam.
+
+    Struts are lofted with their buried ends left open (``cap_bottom=False``),
+    which is right for the printed result — a flat downward face is a 90 degree
+    overhang however deeply it is buried — but it means the exported STL is a
+    soup of shells that only *overlap* where an arm or a cross-link meets a
+    pillar. Slicers have to reconcile that themselves, and where two tubes cross
+    at a shallow angle the intersection is a wedge of near-degenerate slivers.
+    That is what shows up downstream as holes at the joints. Dropping a closed
+    ball on the junction point gives the corner unambiguous solid to be made of.
+
+    The ball is sized to the **pillar** and centred on its axis, so it is
+    inscribed in the shaft rather than bulging out of it: it adds no silhouette
+    the shaft did not already have, and it cannot introduce an overhang, because
+    everything below its equator has pillar underneath it. See
+    :func:`rsupport.resin._joint_radius`.
+
+    An icosphere rather than a stack of rings — the rest of this module lofts
+    horizontal cross-sections because their *profile* has to be controlled, and
+    a sphere has no profile to argue about. What matters here is that every
+    triangle is well shaped, which is exactly what a ring stack fails at as it
+    closes on a pole.
+    """
+    radius = float(radius)
+    if radius <= _EPS:
+        return trimesh.Trimesh()
+    ball = trimesh.creation.icosphere(subdivisions=subdivisions, radius=radius)
+    ball.apply_translation(np.asarray(centre, dtype=np.float64))
+    return ball
 
 
 # --------------------------------------------------------------------------- #

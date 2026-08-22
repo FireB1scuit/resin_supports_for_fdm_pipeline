@@ -77,7 +77,7 @@ def test_pipeline_runs_and_stays_within_the_overhang_budget(mini, preset):
     if build.dropped:
         assert any("unsupported" in w for w in build.warnings), "drops must be reported"
 
-    rep = printability_report(build.mesh, params, mini)
+    rep = printability_report(build.mesh, params, mini, joints=build.joints)
     share = rep["violations"] / max(rep["total"], 1)
     assert share <= VIOLATION_BUDGET, (
         f"{preset}: {rep['violations']}/{rep['total']} support faces overhang more than "
@@ -112,7 +112,7 @@ def test_the_default_lift_survives_the_whole_pipeline(floating_mini):
     share_dropped = len(build.dropped) / max(len(points), 1)
     assert share_dropped <= PLATE_ONLY_DROP_BUDGET, f"dropped {len(build.dropped)}/{len(points)}"
 
-    rep = printability_report(build.mesh, params, floating_mini)
+    rep = printability_report(build.mesh, params, floating_mini, joints=build.joints)
     share = rep["violations"] / max(rep["total"], 1)
     assert share <= VIOLATION_BUDGET, (
         f"{rep['violations']}/{rep['total']} support faces overhang more than "

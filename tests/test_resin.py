@@ -742,9 +742,46 @@ def test_output_is_printable_and_deterministic():
     b = build_resin(model, points, PARAMS)
     assert len(a.mesh.faces) == len(b.mesh.faces)
 
-    rep = printability_report(a.mesh, PARAMS, model)
+    rep = printability_report(a.mesh, PARAMS, model, joints=a.joints)
     assert rep["total"] > 0
     assert rep["violations"] == 0, f"{rep['violations']}/{rep['total']} faces overhang"
+
+
+def test_a_junction_ball_stays_inside_its_pillar():
+    """The one exemption from the overhang rule, and what pays for it.
+
+    `printability_report` excuses the underside of a junction ball on the
+    grounds that there is pillar underneath it. That is only true while the
+    ball is inscribed in the shaft it sits on, so it is checked here rather
+    than assumed: every ball must sit on some shaft's axis, and be no wider
+    than that shaft is at that height — bar the shallow lens a ball is allowed
+    to stand proud by when the strut it seals is fatter than the pillar, which
+    is capped at `Rp / cos(limit)` precisely so the lens itself stays
+    printable. See `resin._joint_radius`.
+    """
+    model = mesh_io.drop_to_bed(table(bar_z=12.0))
+    build = build_resin(model, bar_points(z=12.0), PARAMS)
+    field = AvoidanceField(model, PARAMS, top_z=14.0)
+    shafts, _, _ = _plan_shafts(field, DownRay(model), bar_points(z=12.0), PARAMS)
+
+    assert len(build.joints), "no junctions were built at all"
+    r_low = PARAMS.shaft_lower_diameter * 0.5
+    r_up = PARAMS.shaft_upper_diameter * 0.5
+    slack = 1.0 / math.cos(math.radians(PARAMS.printable_overhang_deg))
+
+    for x, y, z, r in build.joints:
+        on = [
+            s
+            for s in shafts
+            if np.linalg.norm(s.xy_at(z) - np.array([x, y])) <= 1e-6
+            and s.land_z - 1e-6 <= z <= s.top_z + 1e-6
+        ]
+        assert on, f"ball at {(x, y, z)} sits on no shaft axis"
+        shaft = on[0]
+        t = (z - shaft.land_z) / max(shaft.top_z - shaft.land_z, 1e-9)
+        r_pillar = r_low + (r_up - r_low) * min(max(t, 0.0), 1.0)
+        assert r <= r_pillar * slack + 1e-9, f"ball at {(x, y, z)} bulges out of its pillar"
+        assert z - r >= shaft.land_z - 1e-9, f"ball at {(x, y, z)} hangs below its landing"
 
 
 def test_no_points_means_no_geometry():
@@ -816,6 +853,6 @@ def test_a_lifted_model_is_held_off_the_plate_by_supports_alone():
     build = build_resin(model, sampling.place_points(model, params), params)
     assert build.mesh.bounds[0][2] == pytest.approx(0.0, abs=1e-6)
     assert build.mesh.bounds[1][2] <= model.bounds[1][2] + params.tip_penetration + 1e-6
-    rep = printability_report(build.mesh, params, model)
+    rep = printability_report(build.mesh, params, model, joints=build.joints)
     assert rep["violations"] == 0
 

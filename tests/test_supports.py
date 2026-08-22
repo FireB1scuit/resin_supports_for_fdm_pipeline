@@ -116,20 +116,36 @@ def ledge_grid(bar_z: float, step: float = 1.5) -> list[SupportPoint]:
 # --------------------------------------------------------------------------- #
 
 
-def printability_report(mesh, params: SupportParams, model=None, ray=None) -> dict:
+def printability_report(
+    mesh, params: SupportParams, model=None, ray=None, joints=None
+) -> dict:
     """Walk every triangle and classify its overhang.
 
-    Two exclusions, both physical rather than convenient:
+    Three exclusions, all physical rather than convenient:
 
     * faces lying flat on the build plate at z=0 — they are printed on glass;
     * faces in contact with the model — the tip's cap sunk into the surface and
       the bottom of a shaft that landed on the model. Material below a face
-      means it is not an overhang at all.
+      means it is not an overhang at all;
+    * faces inside a junction ball (``SupportBuild.joints``, as ``(x, y, z, r)``
+      rows). The balls are inscribed in the pillars they sit on, so their
+      undersides have shaft beneath them for the same reason — see
+      :func:`rsupport.resin._joint_radius`, and
+      ``test_resin.test_a_junction_ball_stays_inside_its_pillar``, which is
+      what earns this exclusion the right to exist.
 
     Everything else must be within ``params.printable_overhang_deg``.
     """
     if mesh is None or len(getattr(mesh, "faces", ())) == 0:
-        return {"worst": 0.0, "violations": 0, "on_plate": 0, "on_model": 0, "total": 0}
+        return {
+            "worst": 0.0,
+            "violations": 0,
+            "violation_angles": np.zeros(0),
+            "on_plate": 0,
+            "on_model": 0,
+            "buried": 0,
+            "total": 0,
+        }
 
     ang = overhang_angles(mesh)
     real = mesh.area_faces > 1e-12
@@ -155,20 +171,35 @@ def printability_report(mesh, params: SupportParams, model=None, ray=None) -> di
         )
         on_model[idx[touching]] = True
 
-    violations = steep & ~on_plate & ~on_model
-    free = real & ~on_plate & ~on_model
+    # A face is buried in a junction ball when all three of its corners are
+    # inside it — which catches the ball's own underside and the sliver of
+    # strut wall the ball swallowed, and nothing that merely passes nearby.
+    buried = np.zeros(len(ang), dtype=bool)
+    j = np.zeros((0, 4)) if joints is None else np.asarray(joints, float).reshape(-1, 4)
+    idx = np.where(steep & ~on_plate & ~on_model)[0]
+    if len(idx) and len(j):
+        for cx, cy, cz, r in j:
+            left = idx[~buried[idx]] if buried[idx].any() else idx
+            if not len(left):
+                break
+            d = np.linalg.norm(tri[left] - np.array([cx, cy, cz]), axis=2)
+            buried[left[(d <= r * (1.0 + 1e-6) + 1e-9).all(axis=1)]] = True
+
+    violations = steep & ~on_plate & ~on_model & ~buried
+    free = real & ~on_plate & ~on_model & ~buried
     return {
         "worst": float(ang[free].max()) if free.any() else 0.0,
         "violations": int(violations.sum()),
         "violation_angles": ang[violations],
         "on_plate": int(on_plate.sum()),
         "on_model": int(on_model.sum()),
+        "buried": int(buried.sum()),
         "total": int(real.sum()),
     }
 
 
-def assert_printable(mesh, params: SupportParams, model=None, ray=None):
-    rep = printability_report(mesh, params, model, ray)
+def assert_printable(mesh, params: SupportParams, model=None, ray=None, joints=None):
+    rep = printability_report(mesh, params, model, ray, joints)
     assert rep["total"] > 0, "no geometry to check"
     assert rep["violations"] == 0, (
         f"{rep['violations']}/{rep['total']} support faces overhang more than "
@@ -341,7 +372,7 @@ def test_the_base_can_be_turned_off_entirely():
     near_plate = build.mesh.vertices[build.mesh.vertices[:, 2] < 1e-9]
     width = 2 * np.linalg.norm(near_plate[:, :2] - np.array([5.0, 0.0]), axis=1).max()
     assert width == pytest.approx(params.shaft_lower_diameter, rel=1e-6)
-    assert_printable(build.mesh, params, model)
+    assert_printable(build.mesh, params, model, joints=build.joints)
 
 
 def test_the_join_cone_survives_the_disc_being_turned_off():
@@ -354,7 +385,7 @@ def test_the_join_cone_survives_the_disc_being_turned_off():
     near_plate = build.mesh.vertices[build.mesh.vertices[:, 2] < 1e-9]
     width = 2 * np.linalg.norm(near_plate[:, :2] - np.array([5.0, 0.0]), axis=1).max()
     assert width == pytest.approx(params.join_cone_diameter, rel=1e-6)
-    assert_printable(build.mesh, params, model)
+    assert_printable(build.mesh, params, model, joints=build.joints)
 
 
 def test_a_support_shorter_than_its_own_base_still_gets_one():
@@ -368,7 +399,7 @@ def test_a_support_shorter_than_its_own_base_still_gets_one():
     near_plate = build.mesh.vertices[build.mesh.vertices[:, 2] < 1e-9]
     width = 2 * np.linalg.norm(near_plate[:, :2] - np.array([5.0, 0.0]), axis=1).max()
     assert width == pytest.approx(params.foot_diameter, rel=1e-6)
-    assert_printable(build.mesh, params, model)
+    assert_printable(build.mesh, params, model, joints=build.joints)
 
 
 def test_point_over_solid_geometry_never_pierces_the_model():
@@ -475,7 +506,7 @@ def test_spherical_tip_is_a_ball_of_the_right_width():
     top = v[v[:, 2] > contact[2] - params.tip_diameter]
     width = 2 * np.linalg.norm(top[:, :2] - contact[:2], axis=1).max()
     assert width == pytest.approx(params.tip_diameter, rel=1e-3)
-    assert_printable(build.mesh, params, model)
+    assert_printable(build.mesh, params, model, joints=build.joints)
 
 
 def test_tip_penetrates_the_model():
@@ -495,7 +526,7 @@ def test_self_printability_on_a_plate_landing_scene():
     assert len(pts) >= 20
     build = build_supports(model, pts, PARAMS)
     assert build.n_points >= len(pts) - 2
-    rep = assert_printable(build.mesh, PARAMS, model)
+    rep = assert_printable(build.mesh, PARAMS, model, joints=build.joints)
     assert rep["total"] > 1000
 
 
@@ -508,14 +539,14 @@ def test_self_printability_on_a_crowded_scene():
     ]
     build = build_supports(model, pts, PARAMS)
     assert build.n_points >= len(pts) - 2
-    assert_printable(build.mesh, PARAMS, model)
+    assert_printable(build.mesh, PARAMS, model, joints=build.joints)
 
 
 def test_self_printability_with_tall_cross_linked_shafts():
     model = table(bar_z=28.0)
     build = build_supports(model, ledge_grid(28.0, step=3.0), PARAMS)
     assert build.n_braces > 0
-    assert_printable(build.mesh, PARAMS, model)
+    assert_printable(build.mesh, PARAMS, model, joints=build.joints)
 
 
 @pytest.mark.parametrize("nozzle", [0.2, 0.25, 0.4])
@@ -523,7 +554,7 @@ def test_self_printability_across_presets(nozzle):
     params = presets.from_nozzle(nozzle)
     model = table(bar_z=14.0)
     build = build_supports(model, ledge_grid(14.0, step=3.0), params)
-    assert_printable(build.mesh, params, model)
+    assert_printable(build.mesh, params, model, joints=build.joints)
 
 
 def test_self_printability_at_the_lean_limit():
@@ -531,7 +562,7 @@ def test_self_printability_at_the_lean_limit():
     params = PARAMS.with_(strut_lean_deg=PARAMS.printable_overhang_deg - 1.0)
     model = table(bar_z=10.0)
     build = build_supports(model, ledge_grid(10.0, step=3.0), params)
-    assert_printable(build.mesh, params, model)
+    assert_printable(build.mesh, params, model, joints=build.joints)
 
 
 # --------------------------------------------------------------------------- #
@@ -577,4 +608,4 @@ def test_smoke_a_few_hundred_points():
 
     assert build.n_points >= len(pts) - 5
     assert elapsed < 60.0
-    assert_printable(build.mesh, PARAMS, model)
+    assert_printable(build.mesh, PARAMS, model, joints=build.joints)

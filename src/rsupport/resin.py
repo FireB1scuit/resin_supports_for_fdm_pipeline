@@ -77,6 +77,7 @@ from .supports import (
     LineXY,
     PathXY,
     foot_profile,
+    make_joint,
     make_strut,
     mesh_rings,
     rings_on_axis,
@@ -187,11 +188,16 @@ def build_resin(
     shafts, dropped, warnings = _plan_shafts(field, ray, points, params)
 
     parts: list[trimesh.Trimesh] = []
+    # Every point where a strut meets a pillar, collected as it is planned and
+    # lofted in one pass below. See `_joint_radius` for what they are for.
+    joints: list[tuple[float, float, float, float]] = []
     for shaft in shafts:
-        parts.extend(_shaft_meshes(shaft, field, params))
+        parts.extend(_shaft_meshes(shaft, field, params, joints))
 
-    links, n_links = _link_shafts(field, ray, shafts, params)
+    links, n_links = _link_shafts(field, ray, shafts, params, joints)
     parts.extend(links)
+
+    parts.extend(make_joint((x, y, z), r) for x, y, z, r in joints)
 
     if any(s.on_model for s in shafts):
         n = sum(1 for s in shafts if s.on_model)
@@ -207,6 +213,7 @@ def build_resin(
         n_braces=n_links,
         dropped=dropped,
         warnings=warnings,
+        joints=np.asarray(joints, dtype=np.float64).reshape(-1, 4),
     )
 
 
@@ -783,7 +790,13 @@ def _drop_shaft(field: AvoidanceField, ray: DownRay, xy, top_z, bucket, params: 
 # --------------------------------------------------------------------------- #
 
 
-def _link_shafts(field: AvoidanceField, ray: DownRay, shafts: list[Shaft], params: SupportParams):
+def _link_shafts(
+    field: AvoidanceField,
+    ray: DownRay,
+    shafts: list[Shaft],
+    params: SupportParams,
+    joints: list | None = None,
+):
     """Tie neighbouring shafts together into a lattice.
 
     Resin slicers run these horizontally. An FDM printer cannot bridge a
@@ -824,7 +837,7 @@ def _link_shafts(field: AvoidanceField, ray: DownRay, shafts: list[Shaft], param
     def build(i: int, j: int) -> bool:
         if (min(i, j), max(i, j)) in made:
             return False
-        rungs = _rungs(field, ray, shafts, i, j, tan_a, storeys, params)
+        rungs = _rungs(field, ray, shafts, i, j, tan_a, storeys, params, joints)
         if not rungs:
             return False
         parts.extend(rungs)
@@ -1197,8 +1210,15 @@ def _rungs(
     tan_a: float,
     storeys: np.ndarray,
     params: SupportParams,
+    joints: list | None = None,
 ) -> list[trimesh.Trimesh]:
-    """Every strut between one pair of shafts — one per storey they both reach."""
+    """Every strut between one pair of shafts — one per storey they both reach.
+
+    Struts only. Where each one meets a pillar is recorded in ``joints`` for
+    :func:`build_resin` to loft a ball onto — kept out of the return value
+    because what comes back from here is measured as links, and a ball is not
+    one.
+    """
     a, b = _uphill(shafts[i], shafts[j])
     band = _link_band(a, b, tan_a, params)
     if band is None:
@@ -1236,6 +1256,12 @@ def _rungs(
                 cap_top=False,
             )
         )
+        # ...and being buried is exactly what makes the two corners hard to
+        # slice: a link crosses a pillar at a shallow angle, so the two shells
+        # meet in a wedge of slivers rather than anything a slicer can call a
+        # solid. Both ends are noted down for a ball; `build_resin` lofts them.
+        _note_joint(joints, a, p0, params.brace_diameter * 0.5, params)
+        _note_joint(joints, b, p1, params.brace_diameter * 0.5, params)
     return out
 
 
@@ -1416,10 +1442,87 @@ def _rings_at_every_bend(profile, axis: PathXY):
     return [(z, float(np.interp(z, xs, rs))) for z in merged]
 
 
+def _note_joint(
+    joints: list | None,
+    shaft: Shaft,
+    point,
+    strut_r: float,
+    params: SupportParams,
+) -> None:
+    """Record a junction on `shaft` at `point` for `build_resin` to loft a ball on."""
+    if joints is None:
+        return
+    point = np.asarray(point, dtype=np.float64)
+    r = _joint_radius(shaft, float(point[2]), strut_r, params)
+    if r > _EPS:
+        joints.append((float(point[0]), float(point[1]), float(point[2]), r))
+
+
+def _joint_radius(shaft: Shaft, z: float, strut_r: float, params: SupportParams) -> float:
+    """How wide the ball at a junction on `shaft` may be.
+
+    Everything that leaves a pillar — an arm, a cross-link — leaves it from a
+    point on the pillar's axis, with the end of the strut left uncapped inside
+    the solid. That is right for the print and wrong for the file: supports are
+    concatenated rather than boolean-unioned, so the export is a soup of shells
+    that merely *overlap* at every junction, and where a thin tube crosses a
+    pillar at a shallow angle the overlap is a wedge of slivers. Slicers read
+    that corner as a hole. A closed ball dropped on the point gives them
+    something unambiguously solid to make the corner out of, and this is what
+    sizes it.
+
+    **The pillar's own width**, which is the point of the exercise: a ball
+    inscribed in the shaft shows nothing on the outside and, more usefully, has
+    shaft under every one of its faces — so a shape whose underside would be a
+    90 degree overhang standing alone costs nothing here. The taper is read off
+    the plain shaft (``shaft_lower_diameter`` at the bottom,
+    ``shaft_upper_diameter`` at the top) and measured from the landing rather
+    than from the top of the foot, so it reads *narrow* wherever the foot, the
+    join cone or the base tip has made the pillar some other width. Erring small
+    is what keeps the ball inside.
+
+    Two things widen or narrow it from there:
+
+    * **At least as wide as the strut it is sealing.** A cross-link is fatter
+      than the top of a pillar, and a ball that does not reach the strut's own
+      surface leaves the corner exactly as it found it. What that buys is a
+      lens of ball standing proud of the shaft, and a lens is printable while
+      it is shallow enough: the steepest it gets is
+      ``atan(sqrt(R^2 - Rp^2) / Rp)``, so ``R <= Rp / cos(limit)`` keeps the
+      whole of it inside the overhang budget, and that is the cap applied here.
+      With the shipped numbers the cross-link asks for 1.14 pillars and is
+      allowed 1.55, so nothing is actually clipped; a preset that pushed a
+      strut fatter than that would get a ball that stops short rather than one
+      that needs supporting.
+    * **Never hanging below where the pillar lands**, which is what stops a
+      joint low down on a shaft from poking out under its own foot.
+    """
+    r_low = params.shaft_lower_diameter * 0.5
+    r_up = params.shaft_upper_diameter * 0.5
+    span = shaft.top_z - shaft.land_z
+    if span <= _EPS:
+        r_pillar = min(r_low, r_up)
+    else:
+        t = min(max((float(z) - shaft.land_z) / span, 0.0), 1.0)
+        r_pillar = r_low + (r_up - r_low) * t
+
+    limit = math.radians(min(float(params.printable_overhang_deg), 89.0))
+    r = max(r_pillar, float(strut_r))
+    r = min(r, r_pillar / max(math.cos(limit), 1e-3))
+    return max(0.0, min(r, float(z) - shaft.land_z))
+
+
 def _shaft_meshes(
-    shaft: Shaft, field: AvoidanceField, params: SupportParams
+    shaft: Shaft,
+    field: AvoidanceField,
+    params: SupportParams,
+    joints: list | None = None,
 ) -> list[trimesh.Trimesh]:
-    """Base, join cone, shaft, arms and tips for one support."""
+    """Base, join cone, shaft, arms and tips for one support.
+
+    Where each arm leaves the pillar is recorded in ``joints`` rather than
+    lofted here; :func:`build_resin` turns the whole list into balls in one go.
+    """
     out: list[trimesh.Trimesh] = []
     r_low = params.shaft_lower_diameter * 0.5
     r_up = params.shaft_upper_diameter * 0.5
@@ -1467,6 +1570,11 @@ def _shaft_meshes(
                 cap_top=False,  # the tip continues from here
             )
         )
+        # The corner the arm leaves through, noted for a ball. It carries no
+        # load the pillar was not already carrying; it is there so the junction
+        # is one closed solid in the file rather than two shells crossing at a
+        # slice-hostile angle. See `_joint_radius`.
+        _note_joint(joints, shaft, arm.attach, params.arm_diameter * 0.5, params)
 
         contact = arm.contact
         elbow = arm.elbow

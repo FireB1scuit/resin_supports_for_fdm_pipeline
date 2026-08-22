@@ -196,6 +196,29 @@ If a push to `main` is ever attempted, stop and open a PR instead.
 - A flat downward face is a 90° overhang wherever it is, including buried inside another
   support. That is why arm joins and tip undersides are built with `cap_bottom=False`
   rather than stacking capped primitives.
+- **Every junction gets a ball** (`supports.make_joint`, sized by `resin._joint_radius`).
+  Supports are concatenated, not boolean-unioned, so the export is a soup of shells that
+  merely *overlap* where an arm or a cross-link meets a pillar — and a thin tube crossing
+  a pillar at a shallow angle overlaps it in a wedge of slivers, which slicers read as a
+  hole in the corner. A closed ball on the junction point gives them solid to make the
+  corner out of. It is an icosphere, not a ring loft: the rest of `supports.py` lofts
+  horizontal cross-sections because their *profile* has to be controlled, and a sphere
+  has no profile to argue about — what matters here is that no triangle is a sliver,
+  which is exactly what a ring stack fails at as it closes on a pole.
+  This is the **one exemption** from the rule above, and it is earned rather than
+  assumed: the ball is sized to the pillar and centred on its axis, so there is shaft
+  under every face of it. It may go as wide as the strut it is sealing — a cross-link is
+  fatter than the top of a pillar and a ball that does not reach the strut's own surface
+  seals nothing — but no wider than `Rp / cos(printable_overhang_deg)`, which is what
+  keeps the lens standing proud of the shaft inside the overhang budget.
+  `SupportBuild.joints` reports them as `(x, y, z, r)` rows; `printability_report`
+  excuses faces buried in one, and
+  `tests/test_resin.py::test_a_junction_ball_stays_inside_its_pillar` is what pays for
+  that exclusion. Do not widen a ball past that cap, and do not excuse a buried face
+  anywhere else.
+  The struts themselves are still left **open** at their buried ends, so the export is
+  not watertight (60 naked edges on the `table` scene). Capping them is now safe — a cap
+  sits inside its ball — but it is a deliberate open question, not an oversight.
 - **The UI is served `Cache-Control: no-cache`** (`web.app._RevalidatingStatic`), and
   `/api/supports` reports override keys it does not recognise. Both exist for the same
   failure: `index.html` and `app.js` are separate files and this is a tool people leave

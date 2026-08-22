@@ -232,3 +232,9 @@ class SupportBuild:
     n_braces: int = 0
     dropped: list[SupportPoint] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    #: Junction balls, as ``(x, y, z, radius)`` rows — every point where a strut
+    #: meets a pillar, with the ball dropped on it to keep the corner solid in
+    #: the exported soup of shells. See :func:`rsupport.resin._joint_radius`.
+    #: They are inscribed in the pillar, so their undersides are the one place
+    #: in the output where a steep face is not an overhang.
+    joints: np.ndarray = field(default_factory=lambda: np.zeros((0, 4)))
