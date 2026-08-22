@@ -91,10 +91,65 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   `supports.build_supports` imports `resin` *inside the function* — a top-level import
   would be circular.
 - Resin cross-links are horizontal; ours cannot be, because no FDM printer bridges a
-  horizontal strut hanging in air. `resin._link_angle` lays them at the shallowest angle
+  horizontal strut hanging in air. `resin.link_angle` lays them at the shallowest angle
   inside the printable band. Adapting resin conventions to what a nozzle can do is the
   point of the project, so make the adaptation and say why — do not copy the resin value
   and hope.
+- **Which shaft braces which is a decision about the whole field, not about one shaft.**
+  A scaffold that holds the model up can still be miserable to look at and worse to cut
+  away, so the arrangement is an output in its own right. Neighbours come from a Delaunay
+  triangulation thinned by the Gabriel condition (`resin._neighbour_candidates`), so the
+  graph is planar and nothing reaches over a shaft standing in between; the
+  neighbour cap is spent globally, shortest link first (`resin._choose_links`), so
+  bracing is even instead of going to whoever the loop reached first; and rung heights
+  are a set of storeys shared by the whole field (`resin._link_storeys`): the minimal
+  cover of every pair's window, so nothing has to fall off the grid to get braced, plus
+  a ladder at `brace_interval`, **anchored at the bottom of the structure**, so a tall
+  pair is tied all the way up instead of twice near the plate. Both halves are field-wide grids — that is what keeps the
+  links lined up, and why stacking rungs does not undo the arrangement.
+  `tests/test_resin.py` pins each of those. Do not put back a
+  per-shaft "nearest few neighbours" loop, and do not lay the storeys on a fixed grid —
+  the windows are narrow and a grid walks past most of them, which is the whole reason
+  the heights are derived from the pairs.
+  Tidiness yields to structure and only in that order: a shaft left with nothing may
+  take a runner-up, and then reach past its own neighbours entirely
+  (`resin._reach_further`), because a tall shaft in a thicket of stubs is exactly the
+  one that needs a brace. Only a shaft with *nothing* gets either.
+  **Having links is not the same as being held.** A link finishes at the height of the
+  shorter shaft it ties, so a tall shaft among stubs is braced at its feet and free up
+  top — the half that flexes. `resin._reach_higher` is the final pass and asks the only
+  question that matters of every shaft: is anything holding the part that needs holding?
+  It measures against the shaft's *topmost existing rung*, not against whether it has
+  any, which is why the earlier passes cannot replace it. Judge changes here on the
+  worst bare top run over the shafts taller than 10 mm — 10.9 mm on the Templar before
+  this pass existed, 3.7 mm after, against a floor of `headroom + rise/2`.
+  `_rung_heights` may also put one rung off the grid at each end of a pair's window,
+  where the storey it can reach is a full rung short of its own floor or ceiling. Those
+  two are the only off-grid rungs; do not add more.
+- **Anchor the storey ladder at the bottom, never at the cover.** The cover is a
+  stabbing of the windows, so when every shaft is much of a height — which is what a
+  large `lift_height` gives you, all of them running plate to underside — it collapses
+  to one storey in the *middle*, and a ladder counted from there leaves the lower half
+  of every pillar bare. At a 20 mm lift on the Templar the lowest link sat 14.8 mm off
+  the plate with the windows open from 1.5. Judge changes here on the lowest rung at a
+  high lift, not just at the default 5 mm, where the bug barely shows.
+- **Compare rung spacings with a tolerance.** Storeys an exact `brace_interval` apart
+  come out a few ulp short of it tens of millimetres up, and a bare `>=` then drops
+  rungs from the middle and top of a ladder. It looks exactly like a deliberate cut-off
+  and cost a real debugging session. `tests/test_resin.py::test_a_ladder_does_not_lose_a_rung_to_a_rounding_tie`
+  pins it; generate grids as `datum + k * interval` rather than by accumulation.
+  A link's top end answers to the **shorter** of the two shafts it ties, never to the
+  one it is climbing — otherwise a link from a stub to a tower carries on up the tower
+  past the stub's own arms with nothing under it. Every constructed test scene has
+  shafts of much the same height, where the two are the same number, so this is pinned
+  on the sculpt in `tests/test_pipeline.py`.
+  `brace_headroom` is the one support dimension deliberately **not** derived from the
+  nozzle and deliberately 0 by default. It is spent out of a pair's window of linkable
+  height, and that window is set by shaft *height* — a property of the model. A coarser
+  nozzle makes shafts fatter, not taller, so nozzle-scaling it takes the same
+  millimetres out of a shorter window: measured, one link diameter of headroom costs
+  nothing at a 0.2 nozzle and a third of the lattice at 0.4. Do not "fix" that by
+  deriving it in `from_nozzle`.
 - **Nothing the generator builds may enter the model. This is a guarantee, not a
   preference**, and it covers every strut, not just the shafts:
   - A **shaft** is routed, not dropped. `resin._route_to_plate` walks the reachability
@@ -127,14 +182,27 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   Supports that *start* on the model — a shaft rooted on the sculpt and branching from
   there — are **not implemented**; the UI checkbox says so. Do not quietly implement them
   behind the flag.
-- The base is a **disc, then a flare**, not a plain cone. A cone is at its full width for
-  exactly one layer, so what grips the glass is a ring of extrusion; the straight-walled
+- The base is a **disc, then a join cone**, not a plain cone. A cone is at its full width
+  for exactly one layer, so what grips the glass is a ring of extrusion; the straight-walled
   disc is the part that sticks, and with a lifted model the discs of neighbouring supports
   overlap into what amounts to a raft. `supports.foot_profile` owns this and
   `tests/test_resin.py::test_the_bases_of_a_lifted_model_overlap_into_a_raft` pins it.
+  The disc (`foot_diameter`/`foot_height`) and the join cone
+  (`join_cone_diameter`/`join_cone_height`, `SupportParams.base_height` is their sum) are
+  independent sliders, not one shape derived from the other — widening the disc for more
+  bed adhesion must not puff the cone out with it, and the cone still appears at its own
+  size when the disc is turned off (`foot_height=0`). The cone is clamped no wider than
+  whatever it is standing on, since anything wider would flare outward going up.
 - A flat downward face is a 90° overhang wherever it is, including buried inside another
   support. That is why arm joins and tip undersides are built with `cap_bottom=False`
   rather than stacking capped primitives.
+- **The UI is served `Cache-Control: no-cache`** (`web.app._RevalidatingStatic`), and
+  `/api/supports` reports override keys it does not recognise. Both exist for the same
+  failure: `index.html` and `app.js` are separate files and this is a tool people leave
+  open across restarts, so a browser is free to pair a new sidebar with a cached script
+  — controls on screen with no listeners on them, which move, show their value, and do
+  nothing. It is indistinguishable from a broken generator and cost a round of
+  debugging the wrong layer. Do not "optimise" the header away.
 - Run `pytest` before pushing.
 
 ## Layout

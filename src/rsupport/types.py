@@ -51,7 +51,11 @@ class SupportParams:
     # 0 = one shaft per contact. 1 = arms reach far to share a shaft, so there
     # are far fewer shafts standing on the plate.
     parenting: float = 0.5
-    # Vertical spacing of the cross-links that tie shafts into a scaffold.
+    # Height from one cross-link to the next up the *same* pair of shafts. Two
+    # neighbouring pillars are tied at every multiple of this that fits between
+    # them, so a tall pair gets a ladder and a short one gets a single rung. The
+    # floor under it is physical: links closer together than their own combined
+    # thickness are one lump, not two links.
     brace_interval: float = 8.0
     # Polygon sides per lofted ring.
     ring_sections: int = 12
@@ -80,7 +84,34 @@ class SupportParams:
     # --- cross-links ---
     brace_enabled: bool = True
     brace_diameter: float = 0.8
+    # Furthest apart two shafts may be and still be linked.
     brace_max_span: float = 12.0
+    # Height above the plate below which no cross-link is laid. 0 means "as low
+    # as the geometry allows", which is half a base height up — the links start
+    # inside the feet, where they cost nothing. Raise it to keep the bottom of
+    # the scaffold open: that is where the base discs have already merged into a
+    # raft and where a cutter has to get in first.
+    brace_start_height: float = 0.0
+    # Clear air kept under the model: no link's top end comes within this of a
+    # shaft's top, which is where that shaft's arms leave for their contacts. A
+    # link crowded up against the arm fan is the one there is no room to get a
+    # blade to, and it is right where the model is most delicate.
+    #
+    # Deliberately not derived from the nozzle, and deliberately 0 by default.
+    # It is spent out of a pair's window of linkable height, and that window is
+    # set by how tall the shafts are — a property of the model. A coarse nozzle
+    # makes shafts fatter, not taller, so scaling this with it takes the same
+    # millimetres out of a shorter window: measured on the sample mini, a
+    # headroom of one link diameter costs nothing at a 0.2 nozzle and a third
+    # of the lattice at 0.4. It is a judgement about how much room you want to
+    # get a cutter into, so it is left to whoever is holding the cutters.
+    brace_headroom: float = 0.0
+    # The angle a link is laid at, above horizontal. None takes the shallowest
+    # angle the printable band allows, which is the most horizontal span per
+    # millimetre of vertical run — and vertical run is what short shafts have
+    # least of. A set value is clamped into that band: outside it a link
+    # overhangs more than the printer can lay down.
+    brace_angle_deg: float | None = None
 
     # --- base ---
     # Bed adhesion, and the one part of the scaffold deliberately *not* derived
@@ -91,6 +122,20 @@ class SupportParams:
     # something very close to a raft.
     foot_diameter: float = 5.0
     foot_height: float = 2.0
+
+    # --- join cone ---
+    # The transition piece between the base disc and the shaft — "base -> join
+    # cone -> shaft" above. It used to be computed as a fraction of the disc's
+    # own width and height, so widening the base for more bed adhesion also
+    # puffed the cone out, and there was no way to size one without the other.
+    # They are independent sliders now: the disc is bed adhesion, the cone is
+    # what actually carries the shaft down onto it, and it is present at its
+    # own size whatever the disc is doing, including when the disc is turned
+    # off (`foot_height=0`). Clamped no wider than the disc it sits on — a cone
+    # wider than what it stands on would flare outward on its way up, which is
+    # an overhang.
+    join_cone_diameter: float = 5.0
+    join_cone_height: float = 1.0
 
     # --- placement ---
     # How far the whole model floats above the plate. This is what a resin
@@ -113,6 +158,11 @@ class SupportParams:
         """Return a copy with fields overridden. Ignores unknown keys."""
         known = {k: v for k, v in kwargs.items() if k in self.__dataclass_fields__}
         return replace(self, **known)
+
+    @property
+    def base_height(self) -> float:
+        """Disc plus join cone: the full height of what a shaft stands on."""
+        return max(0.0, self.foot_height) + max(0.0, self.join_cone_height)
 
 
 @dataclass
@@ -178,6 +228,7 @@ class SupportBuild:
 
     mesh: object  # trimesh.Trimesh — untyped to keep this module import-light
     n_points: int = 0
+    #: Cross-link struts built. A pair of shafts tied at four heights is four.
     n_braces: int = 0
     dropped: list[SupportPoint] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)

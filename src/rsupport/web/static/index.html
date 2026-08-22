@@ -239,10 +239,6 @@
         </select>
       </div>
       <div class="row">
-        <label for="braces">cross-links</label>
-        <input type="checkbox" id="braces" checked>
-      </div>
-      <div class="row">
         <label for="plateonly">supports from plate only</label>
         <input type="checkbox" id="plateonly" checked>
       </div>
@@ -252,6 +248,58 @@
         propped off the sculpt. Supports that <em>start</em> on the model are
         not implemented yet, so unticking this only lets a blocked shaft stop
         where it is.
+      </p>
+    </section>
+
+    <section>
+      <h2>cross-links</h2>
+      <div class="row">
+        <label for="braces">cross-links</label>
+        <input type="checkbox" id="braces" checked>
+      </div>
+      <div class="row">
+        <label for="bracethick">link &oslash;</label>
+        <input type="range" id="bracethick" min=".3" max="2.5" step=".05">
+        <output id="bracethick_v"></output>
+      </div>
+      <div class="row">
+        <label for="bracespan">max span</label>
+        <input type="range" id="bracespan" min="2" max="25" step=".5">
+        <output id="bracespan_v"></output>
+      </div>
+      <div class="row">
+        <label for="braceangle">link angle</label>
+        <input type="range" id="braceangle" min="40" max="50" step="1">
+        <output id="braceangle_v"></output>
+      </div>
+      <div class="row">
+        <label for="bracestart">start height</label>
+        <input type="range" id="bracestart" min="0" max="20" step=".5">
+        <output id="bracestart_v"></output>
+      </div>
+      <div class="row">
+        <label for="bracespacing">link spacing</label>
+        <input type="range" id="bracespacing" min="2" max="20" step=".5">
+        <output id="bracespacing_v"></output>
+      </div>
+      <div class="row">
+        <label for="braceheadroom">headroom</label>
+        <input type="range" id="braceheadroom" min="0" max="8" step=".1">
+        <output id="braceheadroom_v"></output>
+      </div>
+      <p style="color:var(--dim); font-size:11px; margin:2px 0 0">
+        Shafts brace against the ones actually next to them, on heights the whole
+        field shares. <b>Max span</b> is how far apart two may be and still be
+        linked. <b>Start height</b> is how far up the scaffold the links begin,
+        measured from the plate; 0 starts them inside the feet, where they cost
+        nothing. <b>Link spacing</b> is the height from one link to the next up
+        the same pair, so a tall pair gets a ladder of them and a short one gets
+        a single rung. <b>Headroom</b> is clear air kept below the shaft tops —
+        that is where the arms fan out to the model, so it is the space you need
+        a blade in; it comes out of the height a link has to work with, so
+        raising it drops links on short supports first. <b>Link angle</b> only
+        moves inside the band that prints: shallower spans further per
+        millimetre of rise, steeper packs the lattice tighter.
       </p>
     </section>
 
@@ -271,6 +319,25 @@
         A disc under every shaft that reaches the plate. Wide enough and they
         overlap into a single raft, which is what makes a scaffold of thin
         shafts stay stuck down.
+      </p>
+    </section>
+
+    <section>
+      <h2>join cone</h2>
+      <div class="row">
+        <label for="cone">cone &oslash;</label>
+        <input type="range" id="cone" min="0" max="15" step=".5">
+        <output id="cone_v"></output>
+      </div>
+      <div class="row">
+        <label for="coneh">cone height</label>
+        <input type="range" id="coneh" min="0" max="5" step=".1">
+        <output id="coneh_v"></output>
+      </div>
+      <p style="color:var(--dim); font-size:11px; margin:2px 0 0">
+        The piece between the base and the shaft. Sized on its own — it does
+        not grow or shrink with the base above, and it is still there even
+        with the base turned off.
       </p>
     </section>
 

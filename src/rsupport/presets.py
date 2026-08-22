@@ -63,10 +63,11 @@ def from_nozzle(
         tip_length=round(max(1.0, shaft), 3),
         tip_penetration=round(max(0.05, layer_height * 1.25), 3),
         brace_diameter=round(link, 3),
-        # foot_diameter / foot_height are deliberately left at their defaults.
-        # Every other dimension here scales with the nozzle because it is a
-        # feature the nozzle has to draw; the base is the one part that answers
-        # to the build plate instead, and a plate needs the same square
+        # foot_diameter / foot_height / join_cone_diameter / join_cone_height
+        # are deliberately left at their defaults. Every other dimension here
+        # scales with the nozzle because it is a feature the nozzle has to
+        # draw; the base and its join cone are the one part that answers to
+        # the build plate instead, and a plate needs the same square
         # millimetres of contact whatever is extruding onto it.
         # A tip cannot bridge, so points must sit closer together than the
         # printer's reliable bridging distance.
@@ -104,6 +105,15 @@ PRESETS: dict[str, SupportParams] = {
     "mini_0.2_sparse": from_nozzle(0.2, support_spacing=4.5, tip_diameter=0.4),
     # Everything held, for models that keep failing.
     "mini_0.2_dense": from_nozzle(0.2, support_spacing=2.0, overhang_angle_deg=55.0),
+    # Verified combo: eSun PLA on a Bambu A1 mini with the 0.2 mm nozzle
+    # upgrade, following the Resin2FDM 1.4 tutorial
+    # (https://www.youtube.com/watch?v=R7pBUk8AvJ8). That guide's numbers —
+    # 0.2 mm nozzle, ~0.08 mm model layers, 1.2-2.0 mm final support width,
+    # 0.3-0.6 mm tips releasing cleanly off a matte/satin PLA like eSun's —
+    # are exactly what `from_nozzle(0.2)` already derives, so this is that
+    # preset under a name that pins the printer/filament pairing it was
+    # actually tuned and printed on, rather than duplicating its geometry.
+    "esun_pla_02_A1m": from_nozzle(0.2),
 }
 
 DEFAULT_PRESET = "mini_0.2"

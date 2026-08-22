@@ -9,6 +9,7 @@ to the stage tests and obvious the first time the pipeline ran on a model.
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -16,7 +17,8 @@ import numpy as np
 import pytest
 import trimesh
 
-from rsupport import mesh_io, presets, sampling, supports
+from rsupport import mesh_io, presets, resin, sampling, supports
+from rsupport.avoidance import AvoidanceField
 from rsupport.raycast import DownRay
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -116,6 +118,37 @@ def test_the_default_lift_survives_the_whole_pipeline(floating_mini):
         f"{rep['violations']}/{rep['total']} support faces overhang more than "
         f"{params.printable_overhang_deg} deg ({share:.4%} > {VIOLATION_BUDGET:.2%})"
     )
+
+
+def test_no_cross_link_finishes_above_the_pair_it_ties(floating_mini):
+    """A link's upper end belongs to the *shorter* of the two shafts it ties.
+
+    Take the ceiling off the shaft being climbed instead and a link from a stub
+    to a tower runs on up the tower, past the stub's own arms, with nothing
+    under its far end. On a field of shafts that are all much of a height the
+    two ceilings are the same number and the mistake is invisible; on a sculpt
+    they are not, and this went six millimetres over before it was caught.
+    """
+    mesh = floating_mini
+    params = presets.get()
+    points = sampling.place_points(mesh, params)
+    ray = DownRay(mesh)
+    field = AvoidanceField(mesh, params, top_z=max(float(p.position[2]) for p in points))
+    shafts, _, _ = resin._plan_shafts(field, ray, points, params)
+    tan_a = math.tan(math.radians(resin.link_angle(params)))
+
+    pos = np.array([s.xy for s in shafts])
+    chosen, _ = resin._choose_links(resin._neighbour_candidates(pos, params), len(shafts))
+    storeys = resin._link_storeys(shafts, chosen, tan_a, params)
+
+    worst, n = 0.0, 0
+    for i, j in chosen:
+        ceiling = min(shafts[i].top_z, shafts[j].top_z) - params.brace_headroom
+        for rung in resin._rungs(field, ray, shafts, i, j, tan_a, storeys, params):
+            n += 1
+            worst = max(worst, float(rung.vertices[:, 2].max()) - ceiling)
+    assert n > 0, "the mini should be cross-linked"
+    assert worst <= 1e-6, f"a link finished {worst:.2f} mm above the pair it ties"
 
 
 def test_supports_stay_under_the_model_they_hold(mini):
@@ -228,7 +261,7 @@ def test_a_support_routes_around_a_thin_blade_rather_than_balancing_on_it():
     # And having stepped aside, no part of it is inside the blade.
     ray = DownRay(fin)
     v = build.mesh.vertices
-    clear = v[(v[:, 2] > params.foot_height) & (v[:, 2] < 25.0 - params.tip_penetration * 2)]
+    clear = v[(v[:, 2] > params.base_height) & (v[:, 2] < 25.0 - params.tip_penetration * 2)]
     assert len(clear)
     assert not ray.inside(clear).any(), "the shaft routed around the blade, not through it"
 

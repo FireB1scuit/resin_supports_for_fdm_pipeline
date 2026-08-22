@@ -67,7 +67,7 @@ from dataclasses import dataclass, field as dc_field
 import numpy as np
 import shapely
 import trimesh
-from scipy.spatial import cKDTree
+from scipy.spatial import Delaunay, QhullError, cKDTree
 from shapely.ops import nearest_points
 
 from .avoidance import AvoidanceField, strut_lean
@@ -84,13 +84,19 @@ from .supports import (
 )
 from .types import SupportBuild, SupportParams, SupportPoint
 
-__all__ = ["build_resin", "Shaft", "Arm"]
+__all__ = ["build_resin", "link_angle", "Shaft", "Arm"]
 
 _EPS = 1e-9
 
 #: How many neighbours one shaft will brace against. More than this and the
-#: scaffold becomes a solid wall that is miserable to cut off.
+#: scaffold becomes a solid wall that is miserable to cut off. It counts
+#: neighbours, not struts: a ladder of rungs up one pair is still one neighbour.
 _LINKS_PER_SHAFT = 3
+
+#: Most rungs up any one pair of shafts, however tall they are. This is a
+#: backstop against a pathological setting, not the control: what actually sets
+#: how many rungs a pair gets is ``brace_interval``, the height between them.
+_MAX_RUNGS = 32
 
 
 @dataclass
@@ -500,9 +506,13 @@ def _group_contacts(elbows: np.ndarray, points, params: SupportParams) -> list[n
 def _min_top(params: SupportParams) -> float:
     """Shortest a shaft may be and still be worth calling a shaft.
 
-    Its own base height: below that the whole shaft is buried inside the base
-    disc. Cross-links start half a base height up (see :func:`_link_shafts`), so
-    a shaft shorter than this cannot be braced at all.
+    Its own disc height: below that the whole shaft is buried inside the base
+    disc. This is a clustering heuristic, decided before any geometry exists,
+    so it only answers to the disc — the one part of the base that is fixed
+    width regardless of the shaft above it. The join cone always narrows to
+    the shaft's own width and gets squashed by the same budget the shaft's
+    height is squashed by (see :func:`_shaft_meshes`), so it does not add a
+    second floor here the way the disc does.
     """
     return max(0.0, float(params.foot_height))
 
@@ -780,79 +790,512 @@ def _link_shafts(field: AvoidanceField, ray: DownRay, shafts: list[Shaft], param
     horizontal strut in mid-air, so each link is laid at a chosen diagonal
     inside the printable band instead — the same lattice, an angle the nozzle
     can manage.
+
+    Which shaft braces which is decided in one go for the whole field rather
+    than shaft by shaft (:func:`_neighbour_candidates`, :func:`_choose_links`),
+    and the rungs are laid on heights the whole field shares
+    (:func:`_link_storeys`). Both exist to make the scaffold read as a
+    structure. Picking neighbours greedily per shaft, and giving each pair its
+    own heights, braces about as well and looks like a scribble.
     """
     parts: list[trimesh.Trimesh] = []
     if not params.brace_enabled or len(shafts) < 2:
         return parts, 0
 
-    angle = _link_angle(params)
+    angle = link_angle(params)
     if angle is None:
         return parts, 0
     tan_a = math.tan(math.radians(angle))
 
     pos = np.array([s.xy for s in shafts])
-    kdt = cKDTree(pos)
+    candidates = _neighbour_candidates(pos, params)
+    if not candidates:
+        return parts, 0
+
+    chosen, spare = _choose_links(candidates, len(shafts))
+    storeys = _link_storeys(shafts, chosen, tan_a, params)
+
     made: set[tuple[int, int]] = set()
-    interval = max(params.brace_interval, params.shaft_lower_diameter * 4.0)
+    # How high up each shaft anything has actually been tied. This is the thing
+    # a scaffold is judged on — not how many links a shaft has, but how much of
+    # it is left free above the topmost one.
+    reach = {i: shafts[i].land_z for i in range(len(shafts))}
 
-    for i, a in enumerate(shafts):
-        # Nearest first: a short link needs less vertical run to stay printable,
-        # so the close pairs are both the cheapest and the most useful.
-        neighbours = sorted(
+    def build(i: int, j: int) -> bool:
+        if (min(i, j), max(i, j)) in made:
+            return False
+        rungs = _rungs(field, ray, shafts, i, j, tan_a, storeys, params)
+        if not rungs:
+            return False
+        parts.extend(rungs)
+        made.add((min(i, j), max(i, j)))
+        top = max(float(r.vertices[:, 2].max()) for r in rungs)
+        reach[i] = max(reach[i], top)
+        reach[j] = max(reach[j], top)
+        return True
+
+    for i, j in chosen:
+        build(i, j)
+
+    # Two things leave a shaft with nothing once the graph has had its say: a
+    # chosen pair that turns out unbuildable, because the model sits in the way
+    # of every rung between them, and a shaft whose neighbours are all far
+    # shorter than it is, so no link to one of them has the vertical run to be
+    # printable at all. A braced shaft is worth more than a tidy one, so both
+    # get a second try — in order of how far the tidy answer has to stretch,
+    # and only ever for a shaft that has nothing.
+    braced = {i for pair in made for i in pair}
+    for i, j in spare:
+        if i not in braced or j not in braced:
+            if build(i, j):
+                braced.update((i, j))
+    for i, j in _reach_further(pos, shafts, braced, tan_a, params):
+        if i not in braced or j not in braced:
+            if build(i, j):
+                braced.update((i, j))
+
+    # Having *a* link is not the same as being held. Now top up the shafts that
+    # are tied only near their feet.
+    for i, j in _reach_higher(pos, shafts, reach, tan_a, params):
+        build(i, j)
+    # Struts, not pairs. A pair braced four times up its height is four links to
+    # look at and four to cut, and counting it once made every control over how
+    # many rungs there are report no change at all.
+    return parts, len(parts)
+
+
+def _reach_further(
+    pos: np.ndarray,
+    shafts: list[Shaft],
+    braced: set[int],
+    tan_a: float,
+    params: SupportParams,
+) -> list[tuple[int, int]]:
+    """Pairs for a shaft its own neighbours could not brace, nearest first.
+
+    A link needs ``span · tan(angle)`` of shared height, and the shaft it is
+    tied to only offers as much as it has. So a tall shaft in a thicket of
+    stubs can be adjacent to five others and still have nowhere to put a strut,
+    and it is the tall ones that most need one. Here, and only here, a shaft is
+    allowed past its neighbours to whatever within ``brace_max_span`` stands
+    tall enough to hold it.
+    """
+    loose = [i for i in range(len(shafts)) if i not in braced]
+    if not loose:
+        return []
+    kdt = cKDTree(pos)
+    out: list[tuple[int, int]] = []
+    for i in loose:
+        near = sorted(
             (j for j in kdt.query_ball_point(pos[i], params.brace_max_span) if j != i),
-            key=lambda j: float(np.linalg.norm(pos[j] - pos[i])),
+            key=lambda j: (float(np.linalg.norm(pos[j] - pos[i])), j),
         )
-        linked_here = 0
-        for j in neighbours:
-            if linked_here >= _LINKS_PER_SHAFT:
-                break
-            b = shafts[j]
-            key = (min(i, j), max(i, j))
-            if key in made:
-                continue
-            span = float(np.linalg.norm(pos[j] - pos[i]))
-            # Overlapping shafts are already one column; nothing to brace.
-            if span < (params.shaft_lower_diameter + params.brace_diameter) * 0.5:
-                continue
+        out.extend(
+            (i, j)
+            for j in near
+            if _link_band(shafts[i], shafts[j], tan_a, params) is not None
+        )
+    return out
 
-            rise = span * tan_a
-            # Start half way up the bases rather than clear of them: on a
-            # short support that half a base height is the difference between a
-            # link and no link, and a link end buried in a base is buried in
-            # solid material, which costs nothing.
-            lo = max(a.land_z, b.land_z) + params.foot_height * 0.5
-            hi = min(a.top_z, b.top_z)
-            if hi - lo < rise:
-                continue
 
-            # One link per interval of height, so tall shafts get a ladder.
-            n = 0
-            z = lo + rise * 0.5
-            while z + rise <= hi and n < 6:
-                ends = _link_ends(a, b, z, tan_a, hi)
-                if ends is None:
-                    z += interval
-                    continue
-                p0, p1 = ends
-                if _strut_clear(field, ray, p0, p1, params.brace_diameter * 0.5, params):
-                    linked_here += 1
-                    # Both ends sit on the shaft axes, so they are buried
-                    # inside the shafts. Capping them would put a flat
-                    # downward face — a 90 degree overhang — inside the solid.
-                    parts.append(
-                        make_strut(
-                            p0,
-                            p1,
-                            params,
-                            radius=params.brace_diameter * 0.5,
-                            cap_bottom=False,
-                            cap_top=False,
-                        )
-                    )
-                    made.add(key)
-                    n += 1
-                z += interval
-    return parts, len(made)
+def _neighbour_candidates(
+    pos: np.ndarray, params: SupportParams
+) -> list[tuple[float, int, int]]:
+    """Every pair of shafts worth bracing, as ``(span, i, j)``, shortest first.
+
+    "Which shafts are neighbours" is a question with a real answer, and it is
+    not "the three nearest ones within `brace_max_span`". Nearest-first picks
+    the same popular shaft from every side of a crowd, leaves the shaft on the
+    far edge of it with nothing, and links two shafts straight over the top of
+    a third standing between them.
+
+    The Delaunay triangulation answers it properly: it is the graph of shafts
+    that are *actually adjacent* in the field, it is planar — so no two links
+    cross in plan — and it does not depend on the order the shafts arrive in.
+    Its long thin border triangles are then dropped by the Gabriel test in
+    :func:`_spans_a_nearer_shaft`, which is what removes a link reaching over
+    an intervening shaft. What is left, on an evenly spaced field, is the grid
+    you would have drawn by hand.
+    """
+    n = len(pos)
+    pairs: set[tuple[int, int]] = set()
+    if n >= 4:
+        try:
+            simplices = Delaunay(pos).simplices
+        except QhullError:
+            simplices = ()  # every shaft on one line: no triangulation exists
+        for tri in simplices:
+            for u, v in ((0, 1), (1, 2), (2, 0)):
+                i, j = int(tri[u]), int(tri[v])
+                pairs.add((min(i, j), max(i, j)))
+    if not pairs:
+        # Too few shafts, or all of them collinear. Offer every pair and let
+        # the span and Gabriel filters below do the thinning.
+        pairs = {(i, j) for i in range(n) for j in range(i + 1, n)}
+
+    kdt = cKDTree(pos)
+    # Overlapping shafts are already one column; nothing to brace.
+    min_span = (params.shaft_lower_diameter + params.brace_diameter) * 0.5
+    out: list[tuple[float, int, int]] = []
+    for i, j in pairs:
+        span = float(np.linalg.norm(pos[j] - pos[i]))
+        if not min_span < span <= params.brace_max_span:
+            continue
+        if _spans_a_nearer_shaft(kdt, i, j, span):
+            continue
+        out.append((span, i, j))
+    # Shortest first: a short link needs less vertical run to stay printable,
+    # so close pairs are both the cheapest and the most useful. The index
+    # tie-break keeps the choice identical from run to run.
+    out.sort()
+    return out
+
+
+def _spans_a_nearer_shaft(kdt: cKDTree, i: int, j: int, span: float) -> bool:
+    """Is a third shaft standing between these two? (The Gabriel condition.)
+
+    Take the circle that has the link as its diameter. Any shaft inside it is
+    closer to both ends than the ends are to each other, so the link is
+    reaching over its head — and two short links through that shaft brace the
+    same pair better and look like they belong there.
+    """
+    mid = (kdt.data[i] + kdt.data[j]) * 0.5
+    inside = kdt.query_ball_point(mid, span * 0.5 * (1.0 - 1e-6))
+    return any(k != i and k != j for k in inside)
+
+
+def _choose_links(candidates: list[tuple[float, int, int]], n_shafts: int):
+    """Split the candidate pairs into the ones to build and the runners-up.
+
+    The cap is on how many *neighbours* a shaft braces against, not on how many
+    struts hang off it: a tall pair with a four-rung ladder between them is
+    still one neighbour. And it is spent globally, shortest link first, which
+    is what makes the result even — per-shaft greed hands the first shaft in
+    the list its three best neighbours and leaves the last one isolated.
+
+    A cap can still cut a corner of the field adrift, and an unbraced island is
+    the one thing worse than an untidy link, so a second pass puts back the
+    shortest link across each remaining split.
+    """
+    parent = list(range(n_shafts))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> bool:
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            return False
+        parent[rb] = ra
+        return True
+
+    chosen: list[tuple[int, int]] = []
+    passed_over: list[tuple[int, int]] = []
+    degree = [0] * n_shafts
+    for _, i, j in candidates:
+        if degree[i] < _LINKS_PER_SHAFT and degree[j] < _LINKS_PER_SHAFT:
+            chosen.append((i, j))
+            degree[i] += 1
+            degree[j] += 1
+            union(i, j)
+        else:
+            passed_over.append((i, j))
+
+    spare: list[tuple[int, int]] = []
+    for i, j in passed_over:  # still shortest first
+        if union(i, j):
+            chosen.append((i, j))
+        else:
+            spare.append((i, j))
+    return chosen, spare
+
+
+def _reach_higher(
+    pos: np.ndarray,
+    shafts: list[Shaft],
+    reach: dict[int, float],
+    tan_a: float,
+    params: SupportParams,
+) -> list[tuple[int, int]]:
+    """Pairs for a shaft left bare up its top end, worst first.
+
+    A link can only finish as high as the *shorter* of the two shafts it ties
+    (:func:`_link_band`), so a tall shaft standing in a thicket of stubs gets
+    braced to the top of the stubs and is free above that — which is the half
+    that flexes, and the half nothing else is holding. On the Templar the worst
+    of them stood 21 mm tall with its highest link at 10: braced, by the count,
+    and a diving board in fact.
+
+    :func:`_reach_further` does not catch this, because that shaft has three
+    perfectly good links and is not destitute. The question here is not "does it
+    have a link" but "is anything holding the part that needs holding", so the
+    test is against how high it is *already* tied: if some shaft within
+    ``brace_max_span`` could hold a link a rung's worth higher than that, it is
+    worth crossing the field for. Where nobody can do better, nothing happens.
+    """
+    kdt = cKDTree(pos)
+    spacing = _rung_spacing(params)
+    offers: list[tuple[float, int, int]] = []
+    for i, shaft in enumerate(shafts):
+        want = reach[i] + spacing
+        best: tuple[tuple[float, float, int], int] | None = None
+        for j in kdt.query_ball_point(pos[i], params.brace_max_span):
+            if j == i:
+                continue
+            band = _link_band(shaft, shafts[j], tan_a, params)
+            if band is None or band[1] < want:
+                continue
+            # Highest first — the point is the height. Nearest breaks the tie,
+            # because a short link is the tidier way to get there.
+            key = (-band[1], float(np.linalg.norm(pos[j] - pos[i])), j)
+            if best is None or key < best[0]:
+                best = (key, j)
+        if best is not None:
+            offers.append((shaft.top_z - reach[i], i, best[1]))
+    # Most bare shaft first, so if two of them want the same partner the one
+    # with more to lose gets it.
+    offers.sort(key=lambda o: (-o[0], o[1]))
+    return [(i, j) for _, i, j in offers]
+
+
+def _link_band(a: Shaft, b: Shaft, tan_a: float, params: SupportParams):
+    """The heights a link between these two may be *centred* on.
+
+    Start half way up the bases rather than clear of them: on a short support
+    that half a base height is the difference between a link and no link, and a
+    link end buried in a base is buried in solid material, which costs nothing.
+    ``brace_start_height`` raises that floor, measured from the plate rather
+    than from where the shaft happens to stand, which is what "how far up the
+    scaffold do the links begin" means to somebody looking at it.
+
+    Stop ``brace_headroom`` short of the shafts' tops. A shaft's top is where
+    its arms leave for their contacts, so a link that goes all the way up
+    arrives in the middle of the arm fan, directly under the model, which is
+    both the busiest place in the scaffold and the one hardest to get a blade
+    into. Giving that back is the one thing the top of a link is worth.
+    """
+    rise = float(np.linalg.norm(b.xy - a.xy)) * tan_a
+    lo = max(
+        max(a.land_z, b.land_z) + params.base_height * 0.5,
+        float(params.brace_start_height),
+    )
+    hi = min(a.top_z, b.top_z) - params.brace_headroom
+    if hi - lo < rise:
+        return None  # no vertical run to spend; this pair gets no link
+    return lo + rise * 0.5, hi - rise * 0.5
+
+
+def _link_storeys(
+    shafts: list[Shaft], edges, tan_a: float, params: SupportParams
+) -> np.ndarray:
+    """The heights the whole field lays its links at.
+
+    Every pair used to start its own ladder from its own base, so on the sample
+    mini the links landed at twenty distinct heights: correct, and visual
+    noise. One shared set of heights turns the same links into storeys — each a
+    row of struts at one level, all leaning the same way, which is what
+    scaffolding looks like and what makes it easy to read and to cut away.
+
+    There are two things a set of storeys has to do, and they want different
+    answers, so it is built in two parts.
+
+    **Reach every pair.** Each pair can only hold a link inside its own window
+    of heights (:func:`_link_band`) — generous on tall shafts, barely there on a
+    short pair over a low overhang. A grid laid at ``brace_interval`` walks
+    straight past the narrow windows, and a pair that reaches no storey has to
+    fall off the grid to get braced at all. So the first storeys are taken *from*
+    the windows: the fewest heights that land inside every one of them, which is
+    a stabbing problem with an exact greedy answer — sort the windows by their
+    top, and each time one is still uncovered put a storey at its top, the
+    height that also reaches furthest into the windows still to come. Each then
+    slides to the middle of the windows it covers.
+
+    **Keep going up.** That cover is minimal by construction — two heights held
+    the whole sample mini — and a 40 mm pair braced twice near the plate is a
+    pair of stilts. So above the lowest storey the set continues as a plain
+    ladder at ``brace_interval``, and a tall pair takes every rung of it that
+    fits. The ladder is one grid for the whole field, so the extra rungs line up
+    across it exactly as the cover does; a ladder rung landing on top of a cover
+    storey is dropped rather than doubled.
+    """
+    interval = _rung_spacing(params)
+    bands = [
+        band
+        for band in (_link_band(shafts[i], shafts[j], tan_a, params) for i, j in edges)
+        if band is not None
+    ]
+    if not bands:
+        return np.empty(0)
+
+    levels: list[float] = []
+    for lo, hi in sorted(bands, key=lambda b: (b[1], b[0])):
+        # Windows arrive in order of their ceiling, so only the newest storey
+        # can possibly be inside this one.
+        if not levels or levels[-1] < lo:
+            levels.append(hi)
+
+    cover = []
+    for z in levels:
+        covered = [b for b in bands if b[0] <= z <= b[1]]
+        middle = float(np.mean([(lo + hi) * 0.5 for lo, hi in covered]))
+        floor = max(lo for lo, _ in covered)
+        ceiling = min(hi for _, hi in covered)
+        cover.append(min(max(middle, floor), ceiling))
+    cover.sort()
+
+    storeys = list(cover)
+    # The ladder is anchored at the *bottom* of the structure and climbs, the way
+    # scaffolding is built. Hanging it off the cover instead is the obvious thing
+    # and is wrong: the cover is a stabbing of the windows, so where the shafts
+    # are all much of a height — which is exactly what a large `lift_height`
+    # produces, every one of them standing from the plate to the model's
+    # underside — the windows are near enough identical, the cover collapses to a
+    # single storey in the *middle* of them, and a ladder counted from there
+    # leaves the whole lower half bare. At a 20 mm lift on the Templar that put
+    # the lowest link 14.8 mm off the plate with the windows open from 1.5, and
+    # the foot of a pillar is the last place to leave unbraced.
+    #
+    # It runs to the highest a link could *ever* finish, not just the highest the
+    # pairs chosen so far reach — a shaft rescued later (:func:`_reach_higher`)
+    # ties higher than anything in `bands`. A storey nothing ends up using costs
+    # nothing; one that is missing cannot be added back.
+    top = max(sh.top_z for sh in shafts) - params.brace_headroom
+    bottom = min(lo for lo, _ in bands)
+    # Counted off the datum rather than accumulated. Adding `interval` to a
+    # running total lets the rounding drift, and a rung spacing that comes out a
+    # fraction under what was asked for is one a `>=` test rejects.
+    rungs = int((top - bottom) / interval) if top > bottom else 0
+    for k in range(min(rungs, _MAX_RUNGS * 4) + 1):
+        z = bottom + k * interval
+        # Half an interval is the closest a ladder rung may come to a storey the
+        # cover already put there; nearer than that and they read as one thick
+        # link rather than two.
+        if all(abs(z - c) > interval * 0.5 for c in cover):
+            storeys.append(z)
+    return np.array(sorted(storeys))
+
+
+def _rung_spacing(params: SupportParams) -> float:
+    """Height between one rung and the next up the same pair of shafts.
+
+    ``brace_interval`` says what it should be. The floor under it is physical
+    rather than a matter of taste: two links closer together than their own
+    combined thickness are not two links, they are one lump with a hole in it.
+    """
+    return max(float(params.brace_interval), params.brace_diameter * 2.0)
+
+
+def _rungs(
+    field: AvoidanceField,
+    ray: DownRay,
+    shafts: list[Shaft],
+    i: int,
+    j: int,
+    tan_a: float,
+    storeys: np.ndarray,
+    params: SupportParams,
+) -> list[trimesh.Trimesh]:
+    """Every strut between one pair of shafts — one per storey they both reach."""
+    a, b = _uphill(shafts[i], shafts[j])
+    band = _link_band(a, b, tan_a, params)
+    if band is None:
+        return []
+    lo, hi = band
+    rise = float(np.linalg.norm(b.xy - a.xy)) * tan_a
+    # How high the *upper* end may finish. It answers to the shorter of the two
+    # shafts, not to the one being climbed: a link from a stub to a tower must
+    # stop where the stub stops, or it runs on up the tower past the stub's own
+    # arms with nothing under it.
+    ceiling = min(a.top_z, b.top_z) - params.brace_headroom
+
+    levels = _rung_heights(storeys, lo, hi, params)
+
+    out: list[trimesh.Trimesh] = []
+    for centre in levels:
+        # `_link_ends` solves the top end for itself, so a rung sits centred on
+        # its storey only as closely as a routed shaft's lean allows.
+        ends = _link_ends(a, b, float(centre) - rise * 0.5, tan_a, ceiling)
+        if ends is None:
+            continue
+        p0, p1 = ends
+        if not _strut_clear(field, ray, p0, p1, params.brace_diameter * 0.5, params):
+            continue
+        # Both ends sit on the shaft axes, so they are buried inside the
+        # shafts. Capping them would put a flat downward face — a 90 degree
+        # overhang — inside the solid.
+        out.append(
+            make_strut(
+                p0,
+                p1,
+                params,
+                radius=params.brace_diameter * 0.5,
+                cap_bottom=False,
+                cap_top=False,
+            )
+        )
+    return out
+
+
+def _rung_heights(storeys: np.ndarray, lo: float, hi: float, params: SupportParams) -> np.ndarray:
+    """Which storeys one pair of shafts hangs a rung on.
+
+    Every storey inside the pair's window, thinned so a tall pair gets a ladder
+    rather than a wall of struts. A pair that reaches no storey at all is one
+    the storeys were not computed from — a runner-up brought in to rescue an
+    unbraced shaft — and it gets a single link at the nearest height it can
+    hold, which is still better than standing loose.
+    """
+    inside = storeys[(storeys >= lo) & (storeys <= hi)]
+    if not len(inside):
+        if not len(storeys):
+            return np.empty(0)
+        nearest = float(min(storeys, key=lambda z: abs(z - (lo + hi) * 0.5)))
+        return np.array([min(max(nearest, lo), hi)])
+
+    spacing = _rung_spacing(params)
+    kept: list[float] = []
+    for z in inside:
+        # The tolerance is not decoration. Storeys an exact `spacing` apart come
+        # out a few ulp short of it once they are tens of millimetres up, so a
+        # bare `>=` throws away the rung at the top of a ladder — which looks,
+        # from the outside, exactly like the links giving up part way up a
+        # pillar. Nothing legitimate sits within a nanometre of the limit.
+        if not kept or z - kept[-1] >= spacing - _EPS:
+            kept.append(float(z))
+        if len(kept) >= _MAX_RUNGS:
+            break
+    # Anchor it at the bottom, for the same reason and more so: the grid is the
+    # field's and a pair's floor is its own, and the foot of a pillar carries
+    # every bending moment above it. A pair whose lowest storey is a full rung
+    # above where it could start gets one at the floor.
+    if kept and len(kept) < _MAX_RUNGS and kept[0] - lo >= spacing - _EPS:
+        kept.insert(0, float(lo))
+    # Top it off. A pair's ceiling is its own number and the grid is the field's,
+    # so the highest storey a pair can reach can sit a whole rung below what it
+    # could actually hold — and that shortfall lands on the one part of a pillar
+    # nothing above is holding. Where the gap is worth a rung, put one at the
+    # ceiling even though it is off the grid. Those two are the only rungs
+    # allowed off it, and a course following the roofline — or the plate — reads
+    # as deliberate in a way that a bare end does not.
+    if kept and len(kept) < _MAX_RUNGS and hi - kept[-1] >= spacing - _EPS:
+        kept.append(float(hi))
+    return np.array(kept)
+
+
+def _uphill(a: Shaft, b: Shaft) -> tuple[Shaft, Shaft]:
+    """Which end a link leaves from, and which it climbs to.
+
+    A diagonal has to lean one way or the other and, for a single link, there
+    is nothing to choose between them. Across a storey there is: decide by
+    position rather than by whatever order the shafts came in, and the whole
+    row leans together instead of each strut picking its own way up.
+    """
+    ka = (round(float(a.xy[0]), 6), round(float(a.xy[1]), 6))
+    kb = (round(float(b.xy[0]), 6), round(float(b.xy[1]), 6))
+    return (a, b) if ka <= kb else (b, a)
 
 
 def _link_ends(a: Shaft, b: Shaft, z: float, tan_a: float, hi: float):
@@ -878,21 +1321,30 @@ def _link_ends(a: Shaft, b: Shaft, z: float, tan_a: float, hi: float):
     return p0, p1
 
 
-def _link_angle(params: SupportParams) -> float | None:
+def link_angle(params: SupportParams) -> float | None:
     """The angle a cross-link is laid at, above horizontal.
 
     A tilted strut overhangs by ``90 - angle`` along its sides and ``angle`` at
-    its ends, so it only prints inside the band between the two. Within that
-    band, take the *shallowest* angle available: every degree shallower is more
-    horizontal span for the same vertical run, and vertical run is the scarce
-    thing — supports on a low overhang are short, and a link that needs more
-    rise than the shafts have simply cannot be placed.
+    its ends, so it prints only inside the band between the two, and that band
+    is narrow: at the default 50 degree limit it is 40 to 50. Nothing outside it
+    is available at any price — a link laid flatter or steeper would need
+    supports of its own, which is the one thing this generator may not build.
+
+    ``brace_angle_deg`` chooses within the band and is clamped to it. Left None
+    it takes the *shallowest* angle there is, because every degree shallower is
+    more horizontal span for the same vertical run, and vertical run is the
+    scarce thing: supports on a low overhang are short, and a link needing more
+    rise than the shafts have cannot be placed at all. Steeper is worth asking
+    for when the shafts are tall and the lattice wants to be denser than the
+    span limit alone allows.
     """
     limit = float(params.printable_overhang_deg)
     lo, hi = 90.0 - limit, limit
     if lo > hi:
         return None
-    return float(min(lo + 2.0, hi))  # a couple of degrees of margin
+    if params.brace_angle_deg is None:
+        return float(min(lo + 2.0, hi))  # a couple of degrees of margin
+    return float(min(max(float(params.brace_angle_deg), lo), hi))
 
 
 # --------------------------------------------------------------------------- #
@@ -901,9 +1353,14 @@ def _link_angle(params: SupportParams) -> float | None:
 
 
 def _foot_radius(
-    shaft: Shaft, foot_h: float, field: AvoidanceField, params: SupportParams
+    shaft: Shaft, total_h: float, field: AvoidanceField, params: SupportParams, want: float
 ) -> float:
-    """The base disc, shrunk to whatever fits beside the model.
+    """``want``, shrunk to whatever fits beside the model.
+
+    Used for both the disc and the join cone — each may want a different
+    width (``params.foot_diameter`` / ``params.join_cone_diameter``), but they
+    occupy the same column, so both are checked against the same ``total_h``
+    (disc height plus join cone height) rather than their own slice of it.
 
     A base is much fatter than the shaft it sits under — 5 mm against 1.2 mm —
     and until shafts routed around obstacles it was never in a position where
@@ -918,13 +1375,13 @@ def _foot_radius(
     is not: that fuses the support to the sculpt. So the disc keeps its full
     width wherever there is room, and gives up only as much as it must.
     """
-    want = params.foot_diameter * 0.5
+    want = float(want)
     floor = params.shaft_lower_diameter * 0.5
-    if foot_h <= _EPS or want <= floor:
+    if total_h <= _EPS or want <= floor:
         return want
 
-    # Every layer the disc actually occupies, not just the one it stands on.
-    top = field.layer_of(shaft.land_z + foot_h)
+    # Every layer the base actually occupies, not just the one it stands on.
+    top = field.layer_of(shaft.land_z + total_h)
     room = min(
         field.room(shaft.xy_at(field.heights[i]), i)
         for i in range(field.layer_of(shaft.land_z), max(top, 0) + 1)
@@ -982,9 +1439,15 @@ def _shaft_meshes(
         # A support shorter than the base is not a reason to skip the base —
         # that support needs the adhesion most — but the base may not grow out
         # of the top of the shaft it is supposed to sit under, so it is squashed
-        # into whatever height there is.
-        foot_h = min(params.foot_height, max(0.0, shaft.top_z - z0 - params.layer_height))
-        profile = list(foot_profile(z0, foot_h, _foot_radius(shaft, foot_h, field, params), r_low))
+        # into whatever height there is. The disc keeps first claim on that
+        # height, same as it always has; the join cone gets what is left.
+        budget = max(0.0, shaft.top_z - z0 - params.layer_height)
+        foot_h = min(params.foot_height, budget)
+        cone_h = min(params.join_cone_height, max(0.0, budget - foot_h))
+        total_h = foot_h + cone_h
+        disc_r = _foot_radius(shaft, total_h, field, params, params.foot_diameter * 0.5)
+        cone_r = _foot_radius(shaft, total_h, field, params, params.join_cone_diameter * 0.5)
+        profile = list(foot_profile(z0, foot_h, disc_r, r_low, cone_h, cone_r * 2.0))
 
     if shaft.top_z > profile[-1][0] + _EPS:
         profile.append((float(shaft.top_z), r_up))

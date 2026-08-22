@@ -166,12 +166,18 @@ Either edit rebuilds only the geometry, so it comes back in well under a second.
 | **overhang** | the angle at which a face is judged to need support | steep walls are being supported unnecessarily (lower) or a shallow slope droops (raise) |
 | **tip style** | conical or spherical contact | spherical snaps off cleaner but grips less |
 | **cross-links** | diagonal struts between slender shafts | turn off only if removal is a nightmare — they exist so tips can stay thin |
+| **link ø** | thickness of those struts | the lattice flexes (raise); it is fighting you at cleanup (lower) |
+| **max span** | furthest apart two shafts may be and still be linked | outlying shafts stand unbraced (raise); links are stretching across gaps you want left open (lower) |
+| **link spacing** | height from one link to the next up the *same* pair of shafts | tall pillars flex between their braces (lower, for more rungs); there is too much to cut off (raise) |
+| **start height** | how far up the scaffold the links begin, measured from the plate | the bottom of the lattice is tangled up with the raft, or you want the first cut to be an easy one (raise). 0 starts them inside the feet, where they cost nothing |
+| **link angle** | how steeply a link climbs, above horizontal | shallower spans further per millimetre of rise, steeper packs the lattice tighter. Only moves inside the band that prints — 40–50° at the default overhang limit — and is clamped there |
+| **headroom** | clear air kept below the shaft tops | you cannot get a blade in under the model (raise). It comes out of the height a link has to work with, so it drops links on short supports first |
 | **supports from plate only** | every support must reach the bed; one that cannot is left unheld and reported | leave it on. Unticking it only lets a blocked shaft stop where it is — supports that *start* on the model are not implemented yet |
 | **base ø** | width of the disc each shaft stands on | supports peel off the plate mid-print (raise); the raft is welded to the bed and impossible to remove (lower) |
 | **base height** | how tall that disc is | the same trade, but height buys grip without eating more bed area |
 
-Changing **tip ø**, **shaft ø**, **tip style**, **cross-links**, **supports from
-plate only** or either **base**
+Changing **tip ø**, **shaft ø**, **tip style**, any of the **cross-link**
+controls, **supports from plate only** or either **base**
 dimension rebuilds geometry only, which is fast. Changing **spacing** or
 **overhang** re-decides where supports go, which takes a moment longer. Changing
 **lift** moves the model, so it redoes both. Sliders act on release, not on drag.
@@ -257,6 +263,12 @@ Useful flags for `supports`:
 | `--lean DEG` | how far a strut may lean off vertical |
 | `--parenting 0..1` | how many tips share a shaft |
 | `--no-braces` | drop the cross-links |
+| `--link-thickness MM` | cross-link diameter |
+| `--link-span MM` | furthest apart two shafts may be and still be linked |
+| `--link-spacing MM` | height from one link to the next up the same pair |
+| `--link-start MM` | height above the plate below which no link is laid |
+| `--link-angle DEG` | how steeply a link climbs; clamped into the printable band |
+| `--link-headroom MM` | clear air left below the shaft tops |
 | `--allow-model-landings` | let a blocked shaft stop on the model instead of being refused |
 | `--auto-orient` | re-pose first (off by default) |
 
@@ -271,6 +283,7 @@ Useful flags for `supports`:
 | `mini_0.4` | 0.4 | 0.12 | 0.60 | 2.0 | 3.0 | 45° |
 | `mini_0.2_sparse` | 0.2 | 0.08 | 0.40 | 1.2 | 4.5 | 45° |
 | `mini_0.2_dense` | 0.2 | 0.08 | 0.30 | 1.2 | 2.0 | 55° |
+| `esun_pla_02_A1m` | 0.2 | 0.08 | 0.30 | 1.2 | 3.0 | 45° |
 
 ## When something goes wrong
 
@@ -623,21 +636,155 @@ the model, which is why that case ends in a tip too and gets reported in the log
 
 ### Cross-links
 
-For each shaft, neighbours within `brace_max_span`, nearest first, at most 3
-links each. With the link angle `a` fixed at 42°:
+A lattice that holds the model up can still be a mess to look at and worse to
+cut off, so *which* shaft braces which, and *at what height*, are decided for the
+whole field at once rather than shaft by shaft.
+
+**Which pairs.** Nearest-first bracing is the obvious rule and a bad one: it picks
+the same popular shaft from every side of a crowd, leaves the shaft on the far
+edge of it with nothing, and links two shafts straight over the top of a third
+standing between them. Instead:
+
+1. **Delaunay triangulation** of the shaft positions in plan. This is the graph
+   of shafts that are genuinely adjacent, it is planar — so no two links cross —
+   and it does not depend on the order the shafts arrived in.
+2. **Span filter**: longer than half the shaft and link diameters (below that
+   they are one column already), no longer than `brace_max_span`.
+3. **Gabriel filter**: drop a link if another shaft stands inside the circle
+   that has the link as its diameter. That shaft is nearer to both ends than
+   they are to each other, so the link is reaching over its head; two short
+   links through it brace the same pair better. This is also what trims
+   Delaunay's long thin border triangles.
+4. **Spend the cap globally**, shortest link first: a pair is taken while both
+   its shafts are under `_LINKS_PER_SHAFT` = 3 *neighbours* — neighbours, not
+   struts, so a tall pair with a four-rung ladder still counts once.
+5. **Reconnect**: a cap can cut a corner of the field adrift, so a second pass
+   over the runners-up puts back the shortest link across each remaining split.
+
+On an evenly spaced field that is the grid you would have drawn by hand.
+
+**At what height.** Each pair has a window of heights it can hold a link in, at
+link angle `a`:
 
 ```
 rise   = span · tan a
 window = [ max(land_z of both) + foot_height/2 ,  min(top_z of both) ]
 ```
 
-The pair is linked only if the window is at least `rise` tall — a short support
-on a low overhang simply has no vertical run to spend, and gets no link. Where
-there is room, links repeat every `brace_interval` up to 6 rungs, so a tall shaft
-gets a ladder. Each candidate link is tested against the model by sampling 10
-interior points along it; both ends are left uncapped, since they are buried
-inside the shafts and a cap there is a 90° overhang in the middle of solid
-plastic.
+and the pair is linked only if the window is at least `rise` tall — a short
+support on a low overhang has no vertical run to spend and gets no link.
+
+Six things are adjustable here, and they all trade against that window.
+`brace_max_span` caps `span`, and so caps `rise`. `brace_angle_deg` sets `a`,
+clamped into the band that prints (`90 − printable_overhang_deg` to
+`printable_overhang_deg`, so 40–50° by default); left unset it takes the
+shallowest angle there is, because that is the most span per millimetre of a
+scarce quantity. `brace_diameter` is the strut thickness. `brace_interval` is the height from one
+rung to the next up the same pair — see below. `brace_start_height` lifts the
+floor of every window, measured from the plate rather than from wherever the
+shaft happens to stand, because "how far up do the links begin" is a question
+about the scaffold and not about one shaft. And `brace_headroom`
+takes the top off the window: a shaft's top is where its arms leave for their
+contacts, so a link that goes all the way up arrives in the middle of the arm
+fan, directly under the model — the busiest part of the scaffold and the worst
+place to have to reach with a blade.
+
+The upper end of a link answers to the **shorter** of the two shafts. Letting it
+climb to the top of the one it is ascending sends a link from a stub to a tower
+straight on up the tower, past the stub's own arms, with nothing under its far
+end — worth six millimetres on the sample mini, and invisible on any test scene
+where the shafts are all much of a height.
+
+Headroom is deliberately 0 by default and deliberately not derived from the
+nozzle, which is the one place the usual rule does not hold. It is spent out of
+the window, and the window is set by how *tall* the shafts are, which is a
+property of the model. A coarser nozzle makes shafts fatter, not taller, so
+scaling headroom with it takes the same millimetres out of a shorter window:
+measured on the mini, one link diameter of headroom costs nothing at a 0.2
+nozzle and a third of the lattice at 0.4. How much room you want for a cutter is
+a judgement, so it is left to whoever is holding the cutters.
+
+Letting each pair start its own ladder from its own base is correct and looks
+like noise: on the sample mini it put 153 links at 20 distinct heights. A fixed
+grid at `brace_interval` is not the fix either — the windows are narrow, and a
+grid walks straight past most of them. So the heights come *from* the windows:
+cover them all with the fewest distinct heights, which is a stabbing problem with
+an exact greedy answer (sort windows by their top; whenever one is still
+uncovered, put a storey at its top). Each storey then slides to the middle of the
+windows it covers. The mini's 153 links become 83, on **2** storeys, with no
+shaft left unbraced.
+
+That cover is minimal by construction — two heights held the whole sample mini —
+which is right for reaching everything and wrong for holding it. A pair of 40 mm
+pillars tied twice near the plate is a pair of stilts. So the set also carries a
+plain ladder at `brace_interval`, and a pair hangs a rung on every storey inside
+its window: one near the plate for a short support, all the way up for a tall one.
+A ladder rung landing within half an interval of a cover storey is dropped rather
+than doubled, and the floor under `brace_interval` is physical — two links closer
+than their own combined thickness are one lump with a hole in it, not two links.
+
+**The ladder is anchored at the bottom of the structure and climbs**, the way
+scaffolding is built. Hanging it off the cover instead is the obvious thing and is
+wrong: the cover is a stabbing of the windows, so where the shafts are all much of
+a height — which is exactly what a large `lift_height` produces, every one of them
+standing from the plate to the model's underside — the windows are near enough
+identical, the cover collapses to a single storey in the *middle* of them, and a
+ladder counted from there leaves the whole lower half bare. At a 20 mm lift on the
+Templar that put the lowest link 14.8 mm off the plate with the windows open from
+1.5 mm, and the foot of a pillar is the last place to leave unbraced. Anchored at
+the bottom it is 1.5 mm.
+
+Because the ladder is one grid for the whole field, the extra rungs line up across
+it exactly as the cover storeys do; stacking links does not undo the arrangement.
+Every rung leans the same way — uphill toward increasing x — so a storey reads as
+a row rather than a scribble.
+
+`SupportBuild.n_braces`, and the **N links** in the UI, count *struts*. A pair
+tied at four heights is four links to look at and four to cut.
+
+**Serving the UI.** The static assets go out with `Cache-Control: no-cache`. The
+sidebar and the script that drives it are two files, this is a tool people leave
+open across restarts, and a browser left to its own freshness guess may pair a new
+`index.html` with a cached `app.js` — which puts controls on screen with nothing
+listening to them. They move, they show their value, and nothing happens, which
+looks exactly like a bug in the generator. `no-cache` still allows the 304, so it
+costs a conditional request per file per load. For the same reason `/api/supports`
+reports any override key the running server does not recognise, instead of
+letting `SupportParams.with_` drop it in silence.
+
+**Exceptions, in order.** A chosen pair can turn out unbuildable, because the
+model is in the way of every rung between them; and a tall shaft can be adjacent
+only to stubs, none of which is tall enough to hold a printable diagonal — which
+is the case that most needs bracing. A shaft left with nothing therefore gets the
+runners-up, and then, failing that, may reach past its own neighbours to anything
+within `brace_max_span` tall enough to hold it. Only a shaft with nothing at all
+is allowed either, so tidiness gives way exactly where it costs a brace.
+
+**Having links is not the same as being held.** A link finishes at the height of
+the *shorter* of the two shafts it ties, so a tall shaft in a thicket of stubs is
+braced to the top of the stubs and free above — the half that flexes, and the
+half nothing else is holding. On the Templar the worst of them stood 21 mm tall
+with its highest link at 10. The graph will never fix that on its own, because
+that shaft has three perfectly good links and is not destitute, so a final pass
+asks a different question of every shaft: *is anything holding the part that
+needs holding?* If some shaft within `brace_max_span` could hold a link a rung's
+worth higher than the topmost one it already has, it is worth crossing the field
+for. Where nobody can do better, nothing happens. The same measurement is what
+the pass is judged on — worst bare top run on a shaft over 10 mm, 10.9 mm before
+and 3.7 mm after, against a floor of `headroom + rise/2`.
+
+Two rungs are allowed off the grid, one at each end, and for the same reason: a
+pair's floor and ceiling are its own numbers and the storeys are the field's, so
+the highest and lowest storeys a pair can reach may each sit a whole rung short of
+what it could actually hold. Those shortfalls land on the two parts of a pillar
+nothing else is holding — the free top, and the foot that carries every bending
+moment above it — so where either gap is worth a rung, one goes at the boundary. A
+course following the roofline, or the plate, reads as deliberate in a way that a
+bare end does not.
+
+Each candidate link is tested against the model by sampling 10 interior points
+along it; both ends are left uncapped, since they are buried inside the shafts and
+a cap there is a 90° overhang in the middle of solid plastic.
 
 ### Profiles that can never need support
 
