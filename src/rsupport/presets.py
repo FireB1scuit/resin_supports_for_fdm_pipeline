@@ -105,6 +105,15 @@ PRESETS: dict[str, SupportParams] = {
     "mini_0.2_sparse": from_nozzle(0.2, support_spacing=4.5, tip_diameter=0.4),
     # Everything held, for models that keep failing.
     "mini_0.2_dense": from_nozzle(0.2, support_spacing=2.0, overhang_angle_deg=55.0),
+    # Verified combo: eSun PLA on a Bambu A1 mini with the 0.2 mm nozzle
+    # upgrade, following the Resin2FDM 1.4 tutorial
+    # (https://www.youtube.com/watch?v=R7pBUk8AvJ8). That guide's numbers —
+    # 0.2 mm nozzle, ~0.08 mm model layers, 1.2-2.0 mm final support width,
+    # 0.3-0.6 mm tips releasing cleanly off a matte/satin PLA like eSun's —
+    # are exactly what `from_nozzle(0.2)` already derives, so this is that
+    # preset under a name that pins the printer/filament pairing it was
+    # actually tuned and printed on, rather than duplicating its geometry.
+    "esun_pla_02_A1m": from_nozzle(0.2),
 }
 
 DEFAULT_PRESET = "mini_0.2"

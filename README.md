@@ -283,6 +283,7 @@ Useful flags for `supports`:
 | `mini_0.4` | 0.4 | 0.12 | 0.60 | 2.0 | 3.0 | 45° |
 | `mini_0.2_sparse` | 0.2 | 0.08 | 0.40 | 1.2 | 4.5 | 45° |
 | `mini_0.2_dense` | 0.2 | 0.08 | 0.30 | 1.2 | 2.0 | 55° |
+| `esun_pla_02_A1m` | 0.2 | 0.08 | 0.30 | 1.2 | 3.0 | 45° |
 
 ## When something goes wrong
 
