@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from './OrbitControls.js';
 import { STLLoader } from './STLLoader.js';
+import { api, postJSON, download, isServerless, onProgress, warmUp } from './transport.js';
 
 // ---------------------------------------------------------------- state
 
@@ -102,24 +103,10 @@ function busy(on) {
 
 // ---------------------------------------------------------------- api
 
-async function api(path, opts = {}) {
-  const res = await fetch(path, opts);
-  if (!res.ok) {
-    let detail = res.statusText;
-    try { detail = (await res.json()).detail ?? detail; } catch { /* not json */ }
-    throw new Error(detail);
-  }
-  return res;
-}
-
-async function postJSON(path, body) {
-  const res = await api(path, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body ?? {}),
-  });
-  return res.json();
-}
+// `api`, `postJSON` and `download` come from transport.js, which is either
+// fetch against the FastAPI app or postMessage to a Pyodide worker running the
+// whole pipeline in this tab. Both answer the same routes, so nothing below
+// this line knows or cares which is in use.
 
 // ------------------------------------------------------------ geometry io
 
@@ -511,7 +498,14 @@ $('preset').addEventListener('change', async () => {
 });
 
 for (const [id, mode] of [['dl3mf', '3mf'], ['dlstl', 'combined'], ['dlsep', 'separate']]) {
-  $(id).onclick = () => { location.href = `/api/export/${state.sid}?mode=${mode}`; };
+  $(id).onclick = async () => {
+    if (!state.sid) return;
+    // Serverless there is nothing to navigate to: the file is assembled in the
+    // tab and handed over as a blob. `download` hides which of the two it is.
+    try { busy(true); await download(`/api/export/${state.sid}?mode=${mode}`); }
+    catch (err) { log(`export failed: ${err.message}`, 'e'); }
+    finally { busy(false); }
+  };
 }
 
 // ---------------------------------------------------------------- dropping
@@ -543,6 +537,23 @@ drop.addEventListener('click', () => {
 
 (async function init() {
   try {
+    if (isServerless) {
+      // Nothing is reachable until the runtime is up, and that is a few
+      // seconds of downloading on a cold cache. Say what it is doing rather
+      // than showing an inert page: the first impression of the hosted build
+      // is this wait, and an unexplained one reads as broken.
+      busy(true);
+      log('starting the pipeline in your browser — nothing is uploaded anywhere', 'w');
+      const stop = onProgress(({ phase, detail }) => {
+        if (phase === 'fatal') log(`could not start: ${detail}`, 'e');
+        else log(`  ${phase}${detail ? ': ' + detail : ''} …`);
+      });
+      await warmUp();
+      stop();
+      log('ready — drop an STL to begin');
+      busy(false);
+    }
+
     const { presets, default: def } = await (await api('/api/presets')).json();
     const sel = $('preset');
     for (const name of Object.keys(presets)) {
@@ -554,6 +565,9 @@ drop.addEventListener('click', () => {
     syncSliders(presets[def]);
     state.params = presets[def];
   } catch (err) {
-    log(`could not reach the server: ${err.message}`, 'e');
+    busy(false);
+    log(isServerless
+      ? `could not start the pipeline: ${err.message}`
+      : `could not reach the server: ${err.message}`, 'e');
   }
 })();

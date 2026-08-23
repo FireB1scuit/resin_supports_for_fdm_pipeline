@@ -121,8 +121,8 @@ def _walk_rings(vertices: np.ndarray, edges: np.ndarray) -> list[np.ndarray] | N
     if degree.max() != 2 or degree[used].min() != 2:
         return None
 
-    neighbour = np.full((n_vert, 2), -1, dtype=np.int64)
-    slot = np.zeros(n_vert, dtype=np.int64)
+    neighbour = np.full((n_vert, 2), -1, dtype=np.intp)
+    slot = np.zeros(n_vert, dtype=np.intp)
     for a, b in edges:
         neighbour[a, slot[a]] = b
         slot[a] += 1
@@ -148,7 +148,7 @@ def _walk_rings(vertices: np.ndarray, edges: np.ndarray) -> list[np.ndarray] | N
         if cur != start:  # open chain
             return None
         if len(loop) >= 3:
-            rings.append(np.asarray(loop, dtype=np.int64))
+            rings.append(np.asarray(loop, dtype=np.intp))
     return rings
 
 
@@ -168,7 +168,7 @@ def _nest(rings: list[Polygon]) -> list[Polygon]:
     geoms = np.empty(n, dtype=object)
     geoms[:] = rings
 
-    parent = np.full(n, -1, dtype=np.int64)
+    parent = np.full(n, -1, dtype=np.intp)
     for i in range(n):
         enclosing = shapely.contains(geoms, rings[i])
         enclosing &= areas > areas[i] * (1.0 + 1e-12)
@@ -176,7 +176,7 @@ def _nest(rings: list[Polygon]) -> list[Polygon]:
         if len(cand):
             parent[i] = cand[np.argmin(areas[cand])]
 
-    depth = np.zeros(n, dtype=np.int64)
+    depth = np.zeros(n, dtype=np.intp)
     for i in np.argsort(-areas):  # parents are larger, so always resolved first
         depth[i] = 0 if parent[i] < 0 else depth[parent[i]] + 1
 

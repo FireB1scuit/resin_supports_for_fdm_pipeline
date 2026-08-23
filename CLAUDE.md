@@ -172,6 +172,30 @@ If a push to `main` is ever attempted, stop and open a PR instead.
     fine and deliberate — that is the raft.
   `tests/test_avoidance.py` pins the sweep; `tests/test_resin.py` pins the guarantees it
   buys, and samples shafts along `xy_at` rather than assuming one XY.
+- **There are two collision backends and the polygon one is the default.** `avoidance.py`
+  is only a selector; the sweep itself lives in `avoidance_polygon.py` (shapely) and
+  `avoidance_raster.py` (boolean masks on a lattice). Both answer the same five questions
+  through the same `Region` API, which is why `resin.py` never asks which it is holding.
+  - The raster one exists for **one reason**: the polygon sweep cannot run under
+    Emscripten. Its per-layer `buffer` → `difference` → `intersection` chain trips a GEOS
+    overlay bug (`TopologyException: depth mismatch`) on the GEOS 3.12 that every Pyodide
+    release ships, against the 3.13 a desktop shapely brings — and Emscripten turns that
+    C++ exception into an unwind that `except BaseException` does not catch and the
+    interpreter does not survive. Removing `simplify` does not help; nor does
+    `shapely.set_precision`. Both were tried.
+  - The raster field is **slower and slightly more conservative**: `mini_0.2` builds go
+    0.65s → 2.32s, and dense drops go 26/347 → 29/347. Violations are 0 under both — the
+    lattice rounds toward *refusing* a position, never toward allowing one, which is what
+    keeps the self-printability invariant intact. Hence two drop budgets in
+    `tests/test_pipeline.py`; they are two measurements of two implementations, not a
+    relaxation of one. Do not merge them.
+  - `_SLACK_RATIO` in `avoidance_raster.py` is a **measured** bound (0.516 cells worst
+    case, checked against exact `shapely.distance`), not the loose half-diagonal one. At
+    the loose value the field refused supports the polygon sweep placed. Re-measure
+    before touching it.
+  - Run the suite both ways before pushing anything that touches either:
+    `RSUPPORT_AVOIDANCE=raster pytest` forces the browser path on a desktop, which is
+    otherwise only ever exercised where a failure is hardest to see.
 - **`plate_only` is on by default: the build plate is the only landing.** A contact with
   no collision-free route down is left unheld and reported in `SupportBuild.warnings`,
   rather than propped off the sculpt. That trade is deliberate and measured both ways in
@@ -196,6 +220,29 @@ If a push to `main` is ever attempted, stop and open a PR instead.
 - A flat downward face is a 90° overhang wherever it is, including buried inside another
   support. That is why arm joins and tip undersides are built with `cap_bottom=False`
   rather than stacking capped primitives.
+- **Every junction gets a ball** (`supports.make_joint`, sized by `resin._joint_radius`).
+  Supports are concatenated, not boolean-unioned, so the export is a soup of shells that
+  merely *overlap* where an arm or a cross-link meets a pillar — and a thin tube crossing
+  a pillar at a shallow angle overlaps it in a wedge of slivers, which slicers read as a
+  hole in the corner. A closed ball on the junction point gives them solid to make the
+  corner out of. It is an icosphere, not a ring loft: the rest of `supports.py` lofts
+  horizontal cross-sections because their *profile* has to be controlled, and a sphere
+  has no profile to argue about — what matters here is that no triangle is a sliver,
+  which is exactly what a ring stack fails at as it closes on a pole.
+  This is the **one exemption** from the rule above, and it is earned rather than
+  assumed: the ball is sized to the pillar and centred on its axis, so there is shaft
+  under every face of it. It may go as wide as the strut it is sealing — a cross-link is
+  fatter than the top of a pillar and a ball that does not reach the strut's own surface
+  seals nothing — but no wider than `Rp / cos(printable_overhang_deg)`, which is what
+  keeps the lens standing proud of the shaft inside the overhang budget.
+  `SupportBuild.joints` reports them as `(x, y, z, r)` rows; `printability_report`
+  excuses faces buried in one, and
+  `tests/test_resin.py::test_a_junction_ball_stays_inside_its_pillar` is what pays for
+  that exclusion. Do not widen a ball past that cap, and do not excuse a buried face
+  anywhere else.
+  The struts themselves are still left **open** at their buried ends, so the export is
+  not watertight (60 naked edges on the `table` scene). Capping them is now safe — a cap
+  sits inside its ball — but it is a deliberate open question, not an oversight.
 - **The UI is served `Cache-Control: no-cache`** (`web.app._RevalidatingStatic`), and
   `/api/supports` reports override keys it does not recognise. Both exist for the same
   failure: `index.html` and `app.js` are separate files and this is a tool people leave
@@ -203,6 +250,28 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   — controls on screen with no listeners on them, which move, show their value, and do
   nothing. It is indistinguishable from a broken generator and cost a round of
   debugging the wrong layer. Do not "optimise" the header away.
+- **There are two front ends and the logic belongs to neither.** `web/core.py` holds every
+  stage as a plain function over a `Session` and imports no fastapi. `web/app.py` is HTTP
+  translation only; `web/browser.py` is the same routes dispatched in-process for the
+  Pyodide worker. **Put behaviour in `core.py`** — a change made in one front end and not
+  the other is a bug that only shows up on one of the two ways people run this.
+  - `browser.py` answers *the same paths* as `app.py` on purpose, so `app.js` keeps every
+    call site and only `static/transport.js` differs. Do not invent a second payload shape
+    for the browser; two front ends that agree on paths are much harder to drift apart.
+  - `tests/test_browser.py` asserts they agree (identical presets, identical summaries),
+    not merely that each works. It also pins the error paths, because a browser build has
+    no fastapi to turn a `raise` into a response — an uncaught exception kills the worker,
+    so `Router.route` must return a status for every expected failure.
+  - The hosted build runs the **raster** collision backend, so it places slightly fewer
+    supports on a dense preset than the desktop does. That is a real difference in output;
+    see the avoidance rule above.
+- **`scripts/build_web.py` is not a frontend build step.** No bundler, no transpiler, no
+  Node, no package.json — the CLAUDE.md rule above still holds and this respects it. It
+  copies `static/`, rewrites the one line in `config.js` that selects the transport, and
+  zips the package so the worker can unpack it into a virtual filesystem the browser has
+  no site-packages for. `tests/test_build_web.py` pins all three, because every way it can
+  go wrong is silent — a bundle that still says `'http'` looks fine until it fetches an
+  API that is not there.
 - Run `pytest` before pushing.
 
 ## Layout
@@ -217,22 +286,31 @@ src/rsupport/
   orient.py    candidate orientations + scoring
   overhang.py  overhang faces + per-layer island detection
   sampling.py  support point placement
-  avoidance.py bottom-up reachability sweep: where a support may stand
+  avoidance.py picks the collision backend; re-exports AvoidanceField/strut_lean
+  avoidance_polygon.py  shapely reachability sweep — the default, and faster
+  avoidance_raster.py   lattice reachability sweep — browser-only, see below
   supports.py  ring/profile primitives + build_supports, the stage-3 entry point
   resin.py     the scaffold itself — shafts, arms, tips, cross-links
   export.py    combined STL, separate STLs, two-object 3MF
   cli.py       headless CLI
-  web/         FastAPI app + static three.js viewer
+  web/core.py     every stage, with no transport attached
+  web/app.py      FastAPI in front of core — the served build
+  web/browser.py  the same routes in-process — the hosted, serverless build
+  web/static/     three.js viewer; transport.js picks which front end it talks to
+scripts/build_web.py   assembles the static bundle
 ```
 
 ## Commands
 
 ```bash
 python -m pytest
+RSUPPORT_AVOIDANCE=raster python -m pytest   # the browser's collision backend
 python -m rsupport.cli supports samples/mini.stl -o out.stl
 python -m rsupport.cli supports samples/mini.stl -o out.stl --lift 0   # set it down instead
 python -m rsupport.web
 docker compose up -d   # same app, containerised, on :8000
+python scripts/build_web.py dist/          # the static, serverless bundle
+python -m http.server -d dist 8000         # ...served like any other files
 ```
 
 `Dockerfile` pins **3.12**, not 3.14, for the same wheel reason as above — every

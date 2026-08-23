@@ -225,7 +225,7 @@ def sample_overhang_candidates(
     areas = np.asarray(mesh.area_faces, dtype=np.float64)
     weights = np.where(mask, areas, 0.0)
     total = float(weights.sum())
-    empty = (np.zeros((0, 3)), np.zeros(0, dtype=np.int64), np.zeros(0))
+    empty = (np.zeros((0, 3)), np.zeros(0, dtype=np.intp), np.zeros(0))
     if total <= 0:
         return empty
 
@@ -240,7 +240,7 @@ def sample_overhang_candidates(
         mesh, count, face_weight=weights, seed=seed
     )
     points = np.asarray(points, dtype=np.float64)
-    faces = np.asarray(faces, dtype=np.int64)
+    faces = np.asarray(faces, dtype=np.intp)
 
     if filter_supportable:
         ok = _supportable(points, mesh, params, ray if ray is not None else DownRay(mesh))
@@ -270,7 +270,7 @@ def _thin(
     """
     n = len(points)
     if n == 0:
-        return np.zeros(0, dtype=np.int64)
+        return np.zeros(0, dtype=np.intp)
 
     alive = np.ones(n, dtype=bool)
     if len(seeds):
@@ -286,7 +286,7 @@ def _thin(
         accepted.append(int(i))
         killed = tree.query_ball_point(points[i], radii[i])
         alive[killed] = False
-    return np.asarray(sorted(accepted), dtype=np.int64)
+    return np.asarray(sorted(accepted), dtype=np.intp)
 
 
 def _span_fill(

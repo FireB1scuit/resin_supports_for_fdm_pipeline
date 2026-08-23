@@ -1,200 +1,101 @@
-"""Where a support may stand: the bottom-up reachability sweep.
+"""Which collision backend answers "where may a support stand".
 
-Every strut the generator places — a shaft dropping to the plate, an arm
-reaching up to a contact, a cross-link tying two shafts together — has to
-answer two questions, and they look like separate problems but are not:
+There are two, and they compute the same thing from the same slices:
 
-1. **Does this pass through the model?**
-2. **Can this reach the build plate, or must it rest on the model?**
+* :mod:`rsupport.avoidance_polygon` — shapely regions, the original. Faster,
+  and the one every desktop and container build uses.
+* :mod:`rsupport.avoidance_raster` — boolean masks on a lattice. Slower, a
+  shade more conservative, and the only one that runs in a browser.
 
-Whether the plate is reachable is a question about the *whole column of layers
-below* a position, so a local "is there something directly beneath me" test
-cannot answer it. It is precomputed instead, bottom-up::
+Two exist because the polygon sweep **cannot run under Emscripten at all**. Its
+per-layer chain of ``buffer`` → ``difference`` → ``intersection`` trips a GEOS
+overlay bug on the sculpts we test, and the GEOS that Pyodide ships is 3.12
+against the 3.13 a desktop shapely brings. That would merely be a crash, except
+Emscripten turns the C++ ``TopologyException`` into an unwind that passes
+straight through the interpreter: ``except BaseException`` does not catch it,
+and the whole Python runtime dies with it. There is no degrading gracefully and
+no retrying, so the browser needs a backend that never calls those operations.
 
-    solid[i]    = model cross-section over [z_i, z_i+1]
-    free[r][i]  = everywhere a strut of radius r may stand on layer i
-    reach[r][0] = free[r][0]
-    reach[r][i] = free[r][i] ∩ reach[r][i-1].buffer(max_move)
+Measured, on the sample mini, against the polygon sweep:
 
-``reach[r][i]`` is exactly the set of positions on layer ``i`` from which a
-strut of radius ``r`` can still get to the plate without ever entering the
-model, given that it may travel at most ``max_move`` sideways per layer. Both
-guarantees then fall out of the descent for free:
+============  ==========================  ========================
+preset        drops (polygon → raster)    build (polygon → raster)
+============  ==========================  ========================
+mini_0.2      6 → 7                       0.65s → 2.32s
+mini_0.25     5 → 4                       0.52s → 1.29s
+mini_0.4      3 → 3                       0.47s → 0.68s
+dense         26 → 29                     1.13s → 4.52s
+lifted        5 → 2                       0.75s → 2.53s
+templar       10 → 10                     1.02s → 1.45s
+============  ==========================  ========================
 
-* a position already inside ``reach`` on the layer below drops straight down;
-* a position outside it moves to the nearest point of ``reach``, which is what
-  makes a shaft step around an arm rather than stop at it;
-* a shaft can only ever land on the model when ``reach`` is genuinely
-  unreachable — not as a preference, but because there is nowhere else to go.
+Violations are 0 under both: every difference lands on *dropped contacts*, the
+safe side, because the lattice rounds toward refusing a position. The gap is
+quantisation and nothing else — at a 0.0375 mm cell the raster field matches the
+polygon field exactly, and takes 15.4s to do it. That is the whole trade, and it
+is why the faster one stays the default rather than being retired.
 
-And since every position is always inside ``free`` for its own radius, no
-support can intersect the model at all. Both guarantees are structural rather
-than a check-and-reject after the fact.
-
-The sweep is deliberately independent of what gets built on top of it. It knows
-about radii and clearances, not about tips, arms or cross-links.
-
-The approach is CuraEngine's tree-support avoidance (Ghostkeeper's original
-CuraEngine PR #655, later rewritten around influence areas), itself descended
-from Vanek et al., *Clever Support* (2014). Collision is sampled at a handful of
-radii for the same reason Cura samples: buffering every layer for every distinct
-radius would be ruinous, and a few buckets are visually indistinguishable.
+**A browser build therefore places slightly fewer supports on a dense preset
+than the desktop does.** That is a real difference in output, not a rounding
+detail, and it is the price of the thing running client-side at all.
 """
 
 from __future__ import annotations
 
-import math
+import os
+import sys
 
-import numpy as np
-import shapely
-from shapely.geometry import box
-from shapely.ops import unary_union
+from .avoidance_polygon import PolygonAvoidanceField, PolygonRegion
+from .avoidance_raster import RasterAvoidanceField, RasterRegion
+from .types import strut_lean
 
-from .overhang import slice_polygons
-from .types import SupportParams
+__all__ = [
+    "AvoidanceField",
+    "PolygonAvoidanceField",
+    "PolygonRegion",
+    "RasterAvoidanceField",
+    "RasterRegion",
+    "backend_name",
+    "select_backend",
+    "strut_lean",
+]
 
-__all__ = ["AvoidanceField", "strut_lean"]
+#: Override the automatic choice — ``polygon`` or ``raster``. Set it to run the
+#: suite against the backend this platform would not otherwise pick, which is
+#: the only way the browser path gets tested on a desktop.
+_ENV_VAR = "RSUPPORT_AVOIDANCE"
 
-#: How many radii the collision field is sampled at.
-_RADIUS_BUCKETS = 6
+_BACKENDS = {
+    "polygon": PolygonAvoidanceField,
+    "raster": RasterAvoidanceField,
+}
 
 
-class AvoidanceField:
-    """Per-layer, per-radius maps of where a support may stand.
+def select_backend(name: str | None = None) -> type:
+    """The collision field class for `name`, or for this platform.
 
-    Built once per model and reused across every strut, which is what keeps the
-    whole thing affordable — the expensive part is slicing, and
-    :func:`rsupport.overhang.slice_polygons` batches every height into a single
-    pass.
+    Emscripten gets the raster field because the polygon one cannot survive
+    there; everything else gets the polygon field because it is faster and
+    marginally less conservative.
     """
-
-    def __init__(self, mesh, params: SupportParams, top_z: float | None = None):
-        self.params = params
-        self.pitch = max(float(params.collision_pitch), 1e-3)
-        self.max_move = self.pitch * math.tan(math.radians(strut_lean(params)))
-
-        lo, hi = mesh.bounds
-        ceiling = float(hi[2] if top_z is None else max(top_z, lo[2] + self.pitch))
-        self.n_layers = max(2, int(math.ceil(ceiling / self.pitch)) + 2)
-        self.heights = np.arange(self.n_layers, dtype=np.float64) * self.pitch
-
-        # Struts fan outward as they descend, so the working area has to be
-        # wider than the model by everything they could travel.
-        span = float(ceiling) * math.tan(math.radians(strut_lean(params)))
-        margin = float(np.clip(span + 5.0, 10.0, 80.0))
-        self.bed = box(lo[0] - margin, lo[1] - margin, hi[0] + margin, hi[1] + margin)
-
-        self.radii = self._radius_buckets()
-        self._build(mesh)
-
-    # -- construction ------------------------------------------------------ #
-
-    def _radius_buckets(self) -> np.ndarray:
-        p = self.params
-        lo = p.tip_diameter * 0.5
-        hi = max(p.max_strut_diameter * 0.5, lo * 1.5)
-        return np.geomspace(lo, hi, _RADIUS_BUCKETS)
-
-    def _build(self, mesh) -> None:
-        p = self.params
-        # Slice just above each layer boundary: a slice exactly at z=0 catches
-        # the model's base plane edge-on and comes back degenerate.
-        sample = np.clip(self.heights + self.pitch * 0.02, 1e-4, None)
-        sections = slice_polygons(mesh, sample)
-
-        solids = []
-        for i in range(self.n_layers):
-            here = sections[i] if i < len(sections) else []
-            above = sections[i + 1] if i + 1 < len(sections) else []
-            merged = [g for g in (*here, *above) if g is not None and not g.is_empty]
-            solids.append(unary_union(merged) if merged else None)
-
-        # Simplifying keeps the repeated buffering in the sweep below from
-        # compounding vertex counts without bound. Cura exposes the same knob
-        # as "collision resolution".
-        tol = max(p.nozzle_diameter * 0.25, 1e-3)
-
-        # Kept un-grown as well as grown. The grown copies answer "may a strut
-        # of radius r stand here"; the raw outline answers "how fat may a strut
-        # standing here be", which is what a base disc needs — see `room`.
-        self._solid = solids
-
-        self._free: list[list] = []
-        self._reach: list[list] = []
-        for r in self.radii:
-            grow = float(r) + p.xy_clearance
-            free = []
-            for solid in solids:
-                if solid is None or solid.is_empty:
-                    free.append(self.bed)
-                else:
-                    # Grow by the tolerance as well: simplifying can shave a
-                    # corner inward, and the collision area must never end up
-                    # smaller than the real one.
-                    blocked = solid.buffer(grow + tol, quad_segs=8).simplify(tol)
-                    free.append(self.bed.difference(blocked))
-
-            reach = [free[0]]
-            for i in range(1, self.n_layers):
-                # Simplify the grown region, never the intersection: tidying up
-                # afterwards can nudge the boundary back outside `free`, and
-                # then a position judged reachable would in fact be in the model.
-                grown = reach[-1].buffer(self.max_move, quad_segs=4).simplify(tol)
-                reach.append(free[i].intersection(grown))
-
-            self._free.append(free)
-            self._reach.append(reach)
-
-    # -- lookup ------------------------------------------------------------ #
-
-    def bucket(self, radius: float) -> int:
-        """Index of the first sampled radius at least as fat as `radius`.
-
-        Rounding up rather than to nearest: a strut judged against a radius
-        smaller than its own could be routed into the model.
-        """
-        idx = int(np.searchsorted(self.radii, float(radius), side="left"))
-        return min(idx, len(self.radii) - 1)
-
-    def layer_of(self, z: float) -> int:
-        return int(np.clip(round(float(z) / self.pitch), 0, self.n_layers - 1))
-
-    def free(self, bucket: int, layer: int):
-        return self._free[bucket][int(np.clip(layer, 0, self.n_layers - 1))]
-
-    def reach(self, bucket: int, layer: int):
-        return self._reach[bucket][int(np.clip(layer, 0, self.n_layers - 1))]
-
-    def standable(self, bucket: int, layer: int, to_plate: bool):
-        return self.reach(bucket, layer) if to_plate else self.free(bucket, layer)
-
-    def room(self, xy, layer: int) -> float:
-        """Fattest radius anything standing at `xy` on this layer could have.
-
-        The bucketed ``free`` maps answer the question the other way round —
-        given a radius, where may it stand — which is the right shape for
-        routing a strut of known width. A base disc is the opposite case: it is
-        placed wherever the shaft came down, and the question is how much of it
-        fits. Buckets are far too coarse to answer that (they stop at
-        ``max_strut_diameter``, and a foot is several times fatter), so this
-        measures the real distance to the model and takes the clearance off it.
-        """
-        solid = self._solid[int(np.clip(layer, 0, self.n_layers - 1))]
-        if solid is None or solid.is_empty:
-            return float("inf")
-        gap = float(solid.distance(shapely.Point(float(xy[0]), float(xy[1]))))
-        return max(0.0, gap - self.params.xy_clearance)
-
-    def contains(self, region, xy) -> bool:
-        if region is None or region.is_empty:
-            return False
-        return bool(shapely.contains_xy(region, float(xy[0]), float(xy[1])))
+    if name is None:
+        name = os.environ.get(_ENV_VAR) or (
+            "raster" if sys.platform == "emscripten" else "polygon"
+        )
+    name = name.strip().lower()
+    if name not in _BACKENDS:
+        raise ValueError(
+            f"unknown avoidance backend {name!r} — expected one of {sorted(_BACKENDS)}"
+        )
+    return _BACKENDS[name]
 
 
-def strut_lean(params: SupportParams) -> float:
-    """Lean allowance off vertical, clamped below the printable limit.
+def backend_name(cls: type | None = None) -> str:
+    cls = cls or AvoidanceField
+    return "raster" if cls is RasterAvoidanceField else "polygon"
 
-    A strut leaning by `a` degrees overhangs by exactly `a`, so this is the
-    entire printability budget for anything that does not run straight up.
-    """
-    return float(np.clip(params.strut_lean_deg, 1.0, params.printable_overhang_deg - 2.0))
+
+#: Bound to a class, not a factory, so annotations and ``isinstance`` still work
+#: and every existing ``from .avoidance import AvoidanceField`` keeps its
+#: meaning.
+AvoidanceField = select_backend()

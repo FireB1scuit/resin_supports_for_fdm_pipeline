@@ -149,7 +149,7 @@ def _model_xml(objects) -> str:
             parts.append(f'     <vertex x="{x:.5g}" y="{y:.5g}" z="{zz:.5g}"/>')
         parts.append("    </vertices>")
         parts.append("    <triangles>")
-        for a, b, c in np.asarray(mesh.faces, dtype=np.int64):
+        for a, b, c in np.asarray(mesh.faces, dtype=np.intp):
             parts.append(f'     <triangle v1="{a}" v2="{b}" v3="{c}"/>')
         parts.append("    </triangles>")
         parts.append("   </mesh>")

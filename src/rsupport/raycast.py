@@ -63,20 +63,26 @@ class DownRay:
         tmin = self.tri[:, :, :2].min(axis=1)
         tmax = self.tri[:, :, :2].max(axis=1)
 
-        i0 = np.clip(((tmin[:, 0] - self.origin[0]) / self.cell).astype(np.int64), 0, self.nx - 1)
-        i1 = np.clip(((tmax[:, 0] - self.origin[0]) / self.cell).astype(np.int64), 0, self.nx - 1)
-        j0 = np.clip(((tmin[:, 1] - self.origin[1]) / self.cell).astype(np.int64), 0, self.ny - 1)
-        j1 = np.clip(((tmax[:, 1] - self.origin[1]) / self.cell).astype(np.int64), 0, self.ny - 1)
+        i0 = np.clip(((tmin[:, 0] - self.origin[0]) / self.cell).astype(np.intp), 0, self.nx - 1)
+        i1 = np.clip(((tmax[:, 0] - self.origin[0]) / self.cell).astype(np.intp), 0, self.nx - 1)
+        j0 = np.clip(((tmin[:, 1] - self.origin[1]) / self.cell).astype(np.intp), 0, self.ny - 1)
+        j1 = np.clip(((tmax[:, 1] - self.origin[1]) / self.cell).astype(np.intp), 0, self.ny - 1)
 
         w = i1 - i0 + 1
         h = j1 - j0 + 1
         counts = w * h
         total = int(counts.sum())
 
-        faces = np.repeat(np.arange(self.n_faces, dtype=np.int64), counts)
+        # `intp`, not `int64`, throughout this module and the rest of the
+        # package. They are the same type on any 64-bit desktop, but wasm32 —
+        # where the browser build runs — has a 32-bit `intp`, and numpy refuses
+        # to take an int64 array as a repeat count or an index there:
+        # "Cannot cast array data from dtype('int64') to dtype('int32')".
+        # Nothing here indexes anything near 2^31 entries, so there is no cost.
+        faces = np.repeat(np.arange(self.n_faces, dtype=np.intp), counts)
         # Position of each entry within its own face's block of cells.
         block_start = np.cumsum(counts) - counts
-        k = np.arange(total, dtype=np.int64) - np.repeat(block_start, counts)
+        k = np.arange(total, dtype=np.intp) - np.repeat(block_start, counts)
         w_rep = np.repeat(w, counts)
         cx = np.repeat(i0, counts) + (k % w_rep)
         cy = np.repeat(j0, counts) + (k // w_rep)
@@ -91,8 +97,8 @@ class DownRay:
     def _candidates(self, xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Return (point_index, face_index) pairs worth testing, flattened."""
         n = len(xy)
-        ix = ((xy[:, 0] - self.origin[0]) / self.cell).astype(np.int64)
-        iy = ((xy[:, 1] - self.origin[1]) / self.cell).astype(np.int64)
+        ix = ((xy[:, 0] - self.origin[0]) / self.cell).astype(np.intp)
+        iy = ((xy[:, 1] - self.origin[1]) / self.cell).astype(np.intp)
         inside = (ix >= 0) & (ix < self.nx) & (iy >= 0) & (iy < self.ny)
         cells = np.where(inside, iy * self.nx + ix, -1)
 
@@ -101,11 +107,11 @@ class DownRay:
         cnt = np.where(inside, ends - starts, 0)
         total = int(cnt.sum())
         if total == 0:
-            empty = np.empty(0, dtype=np.int64)
+            empty = np.empty(0, dtype=np.intp)
             return empty, empty
 
-        pidx = np.repeat(np.arange(n, dtype=np.int64), cnt)
-        offs = np.arange(total, dtype=np.int64) - np.repeat(np.cumsum(cnt) - cnt, cnt)
+        pidx = np.repeat(np.arange(n, dtype=np.intp), cnt)
+        offs = np.arange(total, dtype=np.intp) - np.repeat(np.cumsum(cnt) - cnt, cnt)
         fidx = self._face_sorted[np.repeat(starts, cnt) + offs]
         return pidx, fidx
 
@@ -118,7 +124,7 @@ class DownRay:
         pts = np.atleast_2d(np.asarray(points, dtype=np.float64))
         pidx, fidx = self._candidates(pts[:, :2])
         if len(pidx) == 0:
-            e = np.empty(0, dtype=np.int64)
+            e = np.empty(0, dtype=np.intp)
             return e, e, np.empty(0)
 
         p = pts[pidx, :2]
@@ -167,7 +173,7 @@ class DownRay:
         pidx, fidx, z = self.column_hits(pts)
 
         best_z = np.full(len(pts), -np.inf)
-        best_f = np.full(len(pts), -1, dtype=np.int64)
+        best_f = np.full(len(pts), -1, dtype=np.intp)
 
         keep = z < (pts[pidx, 2] - eps) if len(pidx) else np.zeros(0, dtype=bool)
         if keep.any():
@@ -189,7 +195,7 @@ class DownRay:
         pidx, fidx, z = self.column_hits(pts)
 
         best_z = np.full(len(pts), np.inf)
-        best_f = np.full(len(pts), -1, dtype=np.int64)
+        best_f = np.full(len(pts), -1, dtype=np.intp)
 
         keep = z > (pts[pidx, 2] + eps) if len(pidx) else np.zeros(0, dtype=bool)
         if keep.any():
@@ -216,7 +222,7 @@ class DownRay:
         """
         pts = np.atleast_2d(np.asarray(points, dtype=np.float64))
         pidx, _, z = self.column_hits(pts)
-        counts = np.zeros(len(pts), dtype=np.int64)
+        counts = np.zeros(len(pts), dtype=np.intp)
         if len(pidx):
             above = z > (pts[pidx, 2] + eps)
             pidx, z = pidx[above], z[above]
