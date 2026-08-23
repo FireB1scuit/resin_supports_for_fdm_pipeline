@@ -4,6 +4,10 @@ Drop in any STL. Get it back fitted with **resin-style supports that an FDM
 printer can actually make** — a scaffold of thin vertical shafts, cross-linked
 into a lattice, ending in tiny snap-off contact tips — ready to slice.
 
+**[Try it in your browser →](https://firebiscuit.github.io/resin_supports_for_fdm_pipeline/)**
+Nothing to install, and your model never leaves your machine — see
+[Running it in a browser](#running-it-in-a-browser).
+
 ## Why
 
 Pre-supported miniatures come with resin supports: hair-thin pillars ending in a
@@ -101,6 +105,50 @@ To publish it somewhere other than port 8000, change the left-hand number in
 `compose.yaml`'s `ports:`. Note the container binds `0.0.0.0` internally, which
 is how the published port reaches it — if you map it to an interface other than
 localhost, anyone who can reach that address can use the app.
+
+## Running it in a browser
+
+There is a second build that has **no server at all**. The whole pipeline —
+slicing, overhang detection, point placement, collision, the scaffold, the
+export — runs inside the tab, as WebAssembly.
+
+**<https://firebiscuit.github.io/resin_supports_for_fdm_pipeline/>**
+
+What that means in practice:
+
+- **Your model is never uploaded anywhere.** There is nothing to upload it to.
+  The page fetches its files once and then never contacts the host again; you
+  could run it off a USB stick. This is the reason to prefer it over any
+  online converter.
+- **Nothing to install** — no Python, no Docker.
+- **First load pulls ~35 MB** of Python runtime from the jsDelivr CDN, then
+  caches it. That wait happens once; the page tells you what it is doing while
+  it waits. Afterwards it starts in a couple of seconds.
+- **It is slower than the desktop app** — a few seconds per build against well
+  under one, because it is running an interpreter inside your browser.
+
+Two honest caveats:
+
+- It uses a different collision backend (see
+  [Known limits](#known-limits)), which is slightly more cautious about where a
+  support may stand. On a dense preset it leaves a couple more contacts unheld
+  than the desktop app does — 29 against 26, on the sample mini. It never
+  places a support *through* the model; the difference only ever goes the safe
+  way.
+- It needs a reasonably current browser: Chrome/Edge 80+, Safari 15+, or
+  **Firefox 114+**. Older Firefox cannot start the worker it runs in.
+
+To build and host it yourself:
+
+```bash
+python scripts/build_web.py dist/
+python -m http.server -d dist 8000     # or copy dist/ to any static host
+```
+
+The output is plain files. Any static host serves it — GitHub Pages,
+Cloudflare Pages, Netlify, S3, a directory on a NAS. There is no runtime cost
+per user because there is no runtime: every visitor's own machine does the work.
+Pushing to `main` publishes it automatically via `.github/workflows/pages.yml`.
 
 ## The workflow
 

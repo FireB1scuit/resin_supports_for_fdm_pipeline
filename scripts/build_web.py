@@ -85,6 +85,14 @@ def build(out_dir: Path) -> None:
         )
     config.write_text(swapped, encoding="utf-8")
 
+    # GitHub Pages runs Jekyll over whatever it publishes unless this file is
+    # present, and Jekyll silently drops anything whose name starts with an
+    # underscore. Nothing here does today, but the failure mode is a file that
+    # is simply absent in production with no error raised anywhere, so the
+    # guard is worth its zero bytes. Written here rather than in the workflow
+    # because the workflow is not the only way this bundle reaches a host.
+    (out_dir / ".nojekyll").write_bytes(b"")
+
     modules = build_source_zip(out_dir / "rsupport_src.zip")
 
     total = sum(p.stat().st_size for p in out_dir.rglob("*") if p.is_file())

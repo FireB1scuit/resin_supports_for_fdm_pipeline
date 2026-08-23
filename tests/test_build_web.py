@@ -39,6 +39,13 @@ def test_the_bundle_selects_the_worker_transport(bundle):
     assert "'http'" not in text
 
 
+def test_the_bundle_opts_out_of_jekyll(bundle):
+    """GitHub Pages runs Jekyll unless told not to, and Jekyll drops anything
+    starting with an underscore — without an error, so the file is just missing
+    once it is live. `.nojekyll` is the opt-out."""
+    assert (bundle / ".nojekyll").exists()
+
+
 def test_every_static_file_is_carried_across(bundle):
     for src in STATIC.iterdir():
         if src.is_file():

@@ -2,7 +2,9 @@
 
 Drop in any STL → it gets auto-oriented for printing and fitted with **resin-style
 supports dimensioned for FDM** (thin shafts, tiny snap-off contact tips, diagonal
-cross-links), then exported ready to slice. Runs as a local web app in the browser.
+cross-links), then exported ready to slice. Runs two ways off one codebase: as a local
+web app (FastAPI + a three.js viewer) and as a **serverless static site** where the whole
+pipeline runs in the tab under Pyodide — see the two-front-ends rule below.
 
 Full design: [docs/PLAN.md](docs/PLAN.md).
 
@@ -312,6 +314,13 @@ docker compose up -d   # same app, containerised, on :8000
 python scripts/build_web.py dist/          # the static, serverless bundle
 python -m http.server -d dist 8000         # ...served like any other files
 ```
+
+Merging to `main` publishes the bundle to GitHub Pages via
+`.github/workflows/pages.yml` — <https://firebiscuit.github.io/resin_supports_for_fdm_pipeline/>.
+The workflow gates on `tests/test_build_web.py` and `tests/test_browser.py` before
+deploying, because a mis-built bundle loads fine and then fails every request. It is
+a third *consumer* of `scripts/build_web.py`, never a second copy of what it does —
+if the bundle needs to change, change the script.
 
 `Dockerfile` pins **3.12**, not 3.14, for the same wheel reason as above — every
 dependency has a cp312 manylinux wheel, so the image needs no compiler. The
