@@ -1,0 +1,68 @@
+# Publish the client-side build to GitHub Pages.
+#
+# The bundle scripts/build_web.py produces needs no server of its own, so
+# "deploying" is just putting those files somewhere. Pages is the cheapest
+# somewhere: no CPU per user, no upload of anyone's model, and nothing to
+# keep running.
+#
+# Requires Settings -> Pages -> Source set to "GitHub Actions" once, by hand.
+# Until that is done, the deploy job fails with "Pages not enabled".
+
+name: pages
+
+on:
+  push:
+    branches: [main]
+  # So a branch can be published for a look before it is merged.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time, and never cancel one halfway: an interrupted deploy can
+# leave the site serving a half-written bundle.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # 3.12 for the same reason the Dockerfile pins it: every dependency
+          # has a cp312 manylinux wheel, so nothing has to be compiled here.
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install
+        run: pip install -e .[dev]
+
+      - name: Check the bundle before publishing it
+        # Every way build_web.py can go wrong is silent. A bundle whose
+        # config.js still says 'http' loads perfectly and then fails every
+        # request against an API that is not there, so it is worth a few
+        # seconds to find that here rather than in someone's browser.
+        run: pytest tests/test_build_web.py tests/test_browser.py
+
+      - name: Build
+        run: python scripts/build_web.py dist
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
