@@ -65,10 +65,8 @@ import math
 from dataclasses import dataclass, field as dc_field
 
 import numpy as np
-import shapely
 import trimesh
 from scipy.spatial import Delaunay, QhullError, cKDTree
-from shapely.ops import nearest_points
 
 from .avoidance import AvoidanceField, strut_lean
 from .mesh_io import concat
@@ -265,7 +263,7 @@ def _strut_clear(
         region = field.free(bucket, int(layer))
         if region is None or region.is_empty:
             return False
-        if not bool(shapely.contains_xy(region, sel[:, 0], sel[:, 1]).all()):
+        if not bool(region.contains_xy(sel[:, 0], sel[:, 1]).all()):
             return False
     return True
 
@@ -665,8 +663,7 @@ def _settle(field: AvoidanceField, xy, z: float, bucket: int, to_plate: bool = T
         return None
     if field.contains(region, xy):
         return np.asarray(xy, dtype=np.float64)
-    q = nearest_points(region, shapely.Point(float(xy[0]), float(xy[1])))[0]
-    moved = np.array([q.x, q.y])
+    moved = field.nearest(region, xy)
     if float(np.linalg.norm(moved - xy)) <= field.max_move * 4.0:
         return moved
     return None
@@ -717,8 +714,7 @@ def _route_to_plate(field: AvoidanceField, xy, top_z: float, bucket: int):
         if region is None or region.is_empty:
             return None
         if not field.contains(region, cur):
-            q = nearest_points(region, shapely.Point(float(cur[0]), float(cur[1])))[0]
-            moved = np.array([q.x, q.y])
+            moved = field.nearest(region, cur)
             if float(np.linalg.norm(moved - cur)) > slack:
                 return None
             cur = moved

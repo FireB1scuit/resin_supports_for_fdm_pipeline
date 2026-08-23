@@ -18,14 +18,19 @@ PARAMS = presets.from_nozzle(0.2)
 
 
 def test_reachable_is_a_subset_of_free():
-    """Reaching the plate from a spot implies being able to stand there."""
+    """Reaching the plate from a spot implies being able to stand there.
+
+    On the lattice this holds exactly — ``reach`` is built by masking ``free``,
+    so there is no boundary slop to forgive, and the assertion is a strict
+    subset rather than an area within a tolerance.
+    """
     model = mesh_io.drop_to_bed(table())
     field = AvoidanceField(model, PARAMS, top_z=12.0)
     for layer in (0, 5, 12):
         for bucket in (0, len(field.radii) - 1):
             free = field.free(bucket, layer)
             reach = field.reach(bucket, layer)
-            assert reach.difference(free.buffer(1e-6)).area < 1e-6
+            assert reach.without(free).area == 0.0
 
 
 def test_the_bottom_layer_is_reachable_wherever_it_is_free():
