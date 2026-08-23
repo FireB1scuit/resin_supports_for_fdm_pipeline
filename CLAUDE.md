@@ -250,6 +250,28 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   — controls on screen with no listeners on them, which move, show their value, and do
   nothing. It is indistinguishable from a broken generator and cost a round of
   debugging the wrong layer. Do not "optimise" the header away.
+- **There are two front ends and the logic belongs to neither.** `web/core.py` holds every
+  stage as a plain function over a `Session` and imports no fastapi. `web/app.py` is HTTP
+  translation only; `web/browser.py` is the same routes dispatched in-process for the
+  Pyodide worker. **Put behaviour in `core.py`** — a change made in one front end and not
+  the other is a bug that only shows up on one of the two ways people run this.
+  - `browser.py` answers *the same paths* as `app.py` on purpose, so `app.js` keeps every
+    call site and only `static/transport.js` differs. Do not invent a second payload shape
+    for the browser; two front ends that agree on paths are much harder to drift apart.
+  - `tests/test_browser.py` asserts they agree (identical presets, identical summaries),
+    not merely that each works. It also pins the error paths, because a browser build has
+    no fastapi to turn a `raise` into a response — an uncaught exception kills the worker,
+    so `Router.route` must return a status for every expected failure.
+  - The hosted build runs the **raster** collision backend, so it places slightly fewer
+    supports on a dense preset than the desktop does. That is a real difference in output;
+    see the avoidance rule above.
+- **`scripts/build_web.py` is not a frontend build step.** No bundler, no transpiler, no
+  Node, no package.json — the CLAUDE.md rule above still holds and this respects it. It
+  copies `static/`, rewrites the one line in `config.js` that selects the transport, and
+  zips the package so the worker can unpack it into a virtual filesystem the browser has
+  no site-packages for. `tests/test_build_web.py` pins all three, because every way it can
+  go wrong is silent — a bundle that still says `'http'` looks fine until it fetches an
+  API that is not there.
 - Run `pytest` before pushing.
 
 ## Layout
@@ -271,7 +293,11 @@ src/rsupport/
   resin.py     the scaffold itself — shafts, arms, tips, cross-links
   export.py    combined STL, separate STLs, two-object 3MF
   cli.py       headless CLI
-  web/         FastAPI app + static three.js viewer
+  web/core.py     every stage, with no transport attached
+  web/app.py      FastAPI in front of core — the served build
+  web/browser.py  the same routes in-process — the hosted, serverless build
+  web/static/     three.js viewer; transport.js picks which front end it talks to
+scripts/build_web.py   assembles the static bundle
 ```
 
 ## Commands
@@ -283,6 +309,8 @@ python -m rsupport.cli supports samples/mini.stl -o out.stl
 python -m rsupport.cli supports samples/mini.stl -o out.stl --lift 0   # set it down instead
 python -m rsupport.web
 docker compose up -d   # same app, containerised, on :8000
+python scripts/build_web.py dist/          # the static, serverless bundle
+python -m http.server -d dist 8000         # ...served like any other files
 ```
 
 `Dockerfile` pins **3.12**, not 3.14, for the same wheel reason as above — every

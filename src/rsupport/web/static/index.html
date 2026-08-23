@@ -392,6 +392,8 @@
 <script type="importmap">
 { "imports": { "three": "./three.module.js" } }
 </script>
+<!-- Classic, so it runs before the deferred module that reads it. -->
+<script src="./config.js"></script>
 <script type="module" src="./app.js"></script>
 </body>
 </html>
