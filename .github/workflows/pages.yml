@@ -5,8 +5,10 @@
 # somewhere: no CPU per user, no upload of anyone's model, and nothing to
 # keep running.
 #
-# Requires Settings -> Pages -> Source set to "GitHub Actions" once, by hand.
-# Until that is done, the deploy job fails with "Pages not enabled".
+# The build job flips Pages to the "GitHub Actions" source itself, so there is
+# nothing to click in Settings. If that step is ever removed, the repo falls
+# back to "Deploy from a branch" and Pages serves a Jekyll rendering of
+# README.md instead of the app.
 
 name: pages
 
@@ -37,6 +39,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Switches Pages to the "GitHub Actions" source, and turns Pages on if it
+      # is off. Without this the repo stays on "Deploy from a branch", where
+      # Jekyll renders README.md into a themed page and serves *that* — the
+      # docs, not the app. The workflow can run green and the site still show
+      # the wrong thing, which is exactly what happened.
+      #
+      # `enablement: true` needs the `pages: write` permission granted above.
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - uses: actions/setup-python@v5
         with:

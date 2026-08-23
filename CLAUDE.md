@@ -329,6 +329,13 @@ deploying, because a mis-built bundle loads fine and then fails every request. I
 a third *consumer* of `scripts/build_web.py`, never a second copy of what it does —
 if the bundle needs to change, change the script.
 
+**What Pages serves is the app, not the docs.** The workflow's `actions/configure-pages`
+step sets the Pages source to "GitHub Actions" on every run. Drop that step and the repo
+reverts to "Deploy from a branch", where Jekyll renders `README.md` into a themed page and
+publishes *that* at the site root — a green workflow and the wrong site, which is a
+genuinely confusing failure to diagnose. `.nojekyll` in the bundle is the other half of
+the same guard.
+
 `Dockerfile` pins **3.12**, not 3.14, for the same wheel reason as above — every
 dependency has a cp312 manylinux wheel, so the image needs no compiler. The
 container runs `python -m rsupport.web` as its only process, so keep that
