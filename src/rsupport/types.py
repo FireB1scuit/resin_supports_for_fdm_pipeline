@@ -238,3 +238,16 @@ class SupportBuild:
     #: They are inscribed in the pillar, so their undersides are the one place
     #: in the output where a steep face is not an overhang.
     joints: np.ndarray = field(default_factory=lambda: np.zeros((0, 4)))
+
+
+def strut_lean(params: SupportParams) -> float:
+    """Lean allowance off vertical, clamped below the printable limit.
+
+    A strut leaning by `a` degrees overhangs by exactly `a`, so this is the
+    entire printability budget for anything that does not run straight up.
+
+    It lives here rather than in ``avoidance`` because both collision backends
+    need it and neither may import the other. ``rsupport.avoidance`` re-exports
+    it, which is where callers should still reach for it.
+    """
+    return float(np.clip(params.strut_lean_deg, 1.0, params.printable_overhang_deg - 2.0))

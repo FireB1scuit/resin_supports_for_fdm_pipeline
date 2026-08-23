@@ -172,6 +172,30 @@ If a push to `main` is ever attempted, stop and open a PR instead.
     fine and deliberate — that is the raft.
   `tests/test_avoidance.py` pins the sweep; `tests/test_resin.py` pins the guarantees it
   buys, and samples shafts along `xy_at` rather than assuming one XY.
+- **There are two collision backends and the polygon one is the default.** `avoidance.py`
+  is only a selector; the sweep itself lives in `avoidance_polygon.py` (shapely) and
+  `avoidance_raster.py` (boolean masks on a lattice). Both answer the same five questions
+  through the same `Region` API, which is why `resin.py` never asks which it is holding.
+  - The raster one exists for **one reason**: the polygon sweep cannot run under
+    Emscripten. Its per-layer `buffer` → `difference` → `intersection` chain trips a GEOS
+    overlay bug (`TopologyException: depth mismatch`) on the GEOS 3.12 that every Pyodide
+    release ships, against the 3.13 a desktop shapely brings — and Emscripten turns that
+    C++ exception into an unwind that `except BaseException` does not catch and the
+    interpreter does not survive. Removing `simplify` does not help; nor does
+    `shapely.set_precision`. Both were tried.
+  - The raster field is **slower and slightly more conservative**: `mini_0.2` builds go
+    0.65s → 2.32s, and dense drops go 26/347 → 29/347. Violations are 0 under both — the
+    lattice rounds toward *refusing* a position, never toward allowing one, which is what
+    keeps the self-printability invariant intact. Hence two drop budgets in
+    `tests/test_pipeline.py`; they are two measurements of two implementations, not a
+    relaxation of one. Do not merge them.
+  - `_SLACK_RATIO` in `avoidance_raster.py` is a **measured** bound (0.516 cells worst
+    case, checked against exact `shapely.distance`), not the loose half-diagonal one. At
+    the loose value the field refused supports the polygon sweep placed. Re-measure
+    before touching it.
+  - Run the suite both ways before pushing anything that touches either:
+    `RSUPPORT_AVOIDANCE=raster pytest` forces the browser path on a desktop, which is
+    otherwise only ever exercised where a failure is hardest to see.
 - **`plate_only` is on by default: the build plate is the only landing.** A contact with
   no collision-free route down is left unheld and reported in `SupportBuild.warnings`,
   rather than propped off the sculpt. That trade is deliberate and measured both ways in
@@ -240,7 +264,9 @@ src/rsupport/
   orient.py    candidate orientations + scoring
   overhang.py  overhang faces + per-layer island detection
   sampling.py  support point placement
-  avoidance.py bottom-up reachability sweep: where a support may stand
+  avoidance.py picks the collision backend; re-exports AvoidanceField/strut_lean
+  avoidance_polygon.py  shapely reachability sweep — the default, and faster
+  avoidance_raster.py   lattice reachability sweep — browser-only, see below
   supports.py  ring/profile primitives + build_supports, the stage-3 entry point
   resin.py     the scaffold itself — shafts, arms, tips, cross-links
   export.py    combined STL, separate STLs, two-object 3MF
@@ -252,6 +278,7 @@ src/rsupport/
 
 ```bash
 python -m pytest
+RSUPPORT_AVOIDANCE=raster python -m pytest   # the browser's collision backend
 python -m rsupport.cli supports samples/mini.stl -o out.stl
 python -m rsupport.cli supports samples/mini.stl -o out.stl --lift 0   # set it down instead
 python -m rsupport.web
