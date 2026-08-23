@@ -129,7 +129,7 @@ def mesh_rings(
         verts[s : s + sections, 1] = cy + r * sa
         verts[s : s + sections, 2] = z
 
-    k = np.arange(sections, dtype=np.int64)
+    k = np.arange(sections, dtype=np.intp)
     k1 = (k + 1) % sections
 
     faces = []

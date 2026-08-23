@@ -346,7 +346,7 @@ def score_orientation(
     verts = np.asarray(mesh.vertices, dtype=np.float64) @ rot.T + matrix[:3, 3]
     normals = np.asarray(mesh.face_normals, dtype=np.float64) @ rot.T
     areas = np.asarray(mesh.area_faces, dtype=np.float64)
-    faces = np.asarray(mesh.faces, dtype=np.int64)
+    faces = np.asarray(mesh.faces, dtype=np.intp)
 
     # Heights are measured from whatever the actual lowest point is, so a caller
     # passing a rotation without the drop still gets a sane answer.

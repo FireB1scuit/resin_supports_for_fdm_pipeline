@@ -65,12 +65,12 @@ def face_detail(mesh) -> np.ndarray:
     mean_area = float(areas.mean()) if len(areas) else 0.0
     denom = np.maximum(areas, max(mean_area * _MIN_AREA_FRACTION, _EPS))
 
-    adjacency = np.asarray(mesh.face_adjacency, dtype=np.int64)
+    adjacency = np.asarray(mesh.face_adjacency, dtype=np.intp)
     raw = np.zeros(n_faces, dtype=np.float64)
 
     if len(adjacency):
         angles = np.abs(np.asarray(mesh.face_adjacency_angles, dtype=np.float64))
-        edges = np.asarray(mesh.face_adjacency_edges, dtype=np.int64)
+        edges = np.asarray(mesh.face_adjacency_edges, dtype=np.intp)
         verts = np.asarray(mesh.vertices, dtype=np.float64)
         edge_len = np.linalg.norm(verts[edges[:, 0]] - verts[edges[:, 1]], axis=1)
 
