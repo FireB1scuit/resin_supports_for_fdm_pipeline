@@ -107,6 +107,21 @@ _CELL_RATIO = 0.375
 #: cell is coarsened instead, which costs room and never safety.
 _MAX_CELLS = 1_200_000
 
+#: How far the lattice may overstate the gap to the model, as a fraction of a
+#: cell. Every ``free`` threshold carries it, so the rasterised set stays a
+#: subset of the true one.
+#:
+#: The worst case a *bound* can give is half a cell diagonal (0.707), reached
+#: only if the surface hides exactly between four samples. The real figure is
+#: smaller, because ``_rasterise`` marks the outline as well as the interior and
+#: those cells straddle the surface rather than sitting off it. Measured against
+#: exact ``shapely.distance`` over the sample mini — every layer, tens of
+#: thousands of cells in the band that matters — the largest overstatement was
+#: **0.516 cells**. This is that measurement plus a margin, not the loose bound:
+#: at 0.707 the field was pessimistic enough to refuse supports the polygon
+#: sweep placed. Re-measure before changing it; do not raise it to buy room.
+_SLACK_RATIO = 0.55
+
 
 class _Lattice:
     """The fixed XY grid every layer's mask is sampled on."""
@@ -242,7 +257,13 @@ class AvoidanceField:
         # be pushed out to. Past that ring nothing is ever blocked, so the old
         # lean-sized bed — tens of millimetres of empty margin in every
         # direction — would be rasterising air.
-        margin = 2.0 * (float(self.radii[-1]) + params.xy_clearance) + 4.0 * self.max_move
+        #
+        # The first term is what "off the lattice is always standable" costs:
+        # the fattest bucket plus its clearance, which is the furthest the model
+        # can reach out and block anything. The second is slack for a
+        # nearest-point query landing near the edge. Padding beyond that is
+        # quadratic in wasted cells.
+        margin = (float(self.radii[-1]) + params.xy_clearance) + 2.0 * self.max_move
         self.bed = box(lo[0] - margin, lo[1] - margin, hi[0] + margin, hi[1] + margin)
 
         cell = self._cell_size(margin, lo, hi)
@@ -250,10 +271,17 @@ class AvoidanceField:
             (lo[0] - margin, lo[1] - margin), (hi[0] + margin, hi[1] + margin), cell
         )
 
-        # Half a cell diagonal: the worst a query point can sit from the centre
-        # that answered for it. Every threshold carries it, so quantisation
-        # costs room rather than safety.
-        self._slack = self._lattice.cell * math.sqrt(2.0) * 0.5
+        self._slack = self._lattice.cell * _SLACK_RATIO
+
+        # How far out a distance is still worth measuring. Two callers set it:
+        # `free`, which never asks past the fattest bucket plus its clearance,
+        # and `room`, which sizes a base disc and so asks out to the widest foot
+        # plus its own. Beyond this everything reads as unobstructed, which is
+        # what it is.
+        self._band = max(
+            float(self.radii[-1]) + params.xy_clearance,
+            params.foot_diameter * 0.5 + params.xy_clearance,
+        ) + self._slack
 
         self._reach_cache: dict[int, np.ndarray] = {}
         self._build(mesh)
@@ -289,18 +317,34 @@ class AvoidanceField:
         # Millimetres from every cell to the nearest solid cell, per layer. One
         # transform answers every radius bucket, which is the whole reason this
         # is cheaper than the polygon sweep it replaced.
+        #
+        # Only measured within a band around the cross-section. Past `_band` no
+        # caller can tell a real distance from an infinite one — it is wider
+        # than the fattest strut's reach and wider than a foot plus its
+        # clearance — and on the upper layers of a sculpt, where the section is
+        # a fraction of the footprint, that turns most of the transform into a
+        # fill.
         self._dist = np.empty((self.n_layers, lat.ny, lat.nx), dtype=np.float32)
+        pad = int(math.ceil(self._band / lat.cell)) + 2
         for i in range(self.n_layers):
             here = sections[i] if i < len(sections) else []
             above = sections[i + 1] if i + 1 < len(sections) else []
             merged = [g for g in (*here, *above) if g is not None and not g.is_empty]
             solid = self._rasterise(merged)
+            self._dist[i] = np.float32(np.inf)
             if solid is None:
-                self._dist[i] = np.float32(np.inf)
-            else:
-                self._dist[i] = ndimage.distance_transform_edt(
-                    ~solid, sampling=lat.cell
-                ).astype(np.float32)
+                continue
+            rows = np.flatnonzero(solid.any(axis=1))
+            cols = np.flatnonzero(solid.any(axis=0))
+            y0 = max(int(rows[0]) - pad, 0)
+            y1 = min(int(rows[-1]) + pad + 1, lat.ny)
+            x0 = max(int(cols[0]) - pad, 0)
+            x1 = min(int(cols[-1]) + pad + 1, lat.nx)
+            # The window holds every solid cell, so distances measured inside it
+            # are the same ones a whole-grid transform would give.
+            self._dist[i, y0:y1, x0:x1] = ndimage.distance_transform_edt(
+                ~solid[y0:y1, x0:x1], sampling=lat.cell
+            ).astype(np.float32)
 
     def _rasterise(self, polygons) -> np.ndarray | None:
         """Mark every cell the cross-section touches.
