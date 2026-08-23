@@ -315,12 +315,26 @@ python scripts/build_web.py dist/          # the static, serverless bundle
 python -m http.server -d dist 8000         # ...served like any other files
 ```
 
-Merging to `main` publishes the bundle to GitHub Pages via
-`.github/workflows/pages.yml` — <https://firebiscuit.github.io/resin_supports_for_fdm_pipeline/>.
+Merging to the **default branch** publishes the bundle to GitHub Pages via
+`.github/workflows/pages.yml` — <https://fireb1scuit.github.io/resin_supports_for_fdm_pipeline/>.
+
+**The default branch is `feat/pipeline-foundation`, not `main`.** There is no `main`
+branch on the remote and never has been; the git rules at the top of this file name one
+that does not exist. Read every "`main`" in them as "the default branch" until the
+branch is actually created and switched to. This matters beyond pedantry: a workflow
+keyed to `main` never fires, which is exactly how the first Pages deploy silently did
+nothing.
 The workflow gates on `tests/test_build_web.py` and `tests/test_browser.py` before
 deploying, because a mis-built bundle loads fine and then fails every request. It is
 a third *consumer* of `scripts/build_web.py`, never a second copy of what it does —
 if the bundle needs to change, change the script.
+
+**What Pages serves is the app, not the docs.** The workflow's `actions/configure-pages`
+step sets the Pages source to "GitHub Actions" on every run. Drop that step and the repo
+reverts to "Deploy from a branch", where Jekyll renders `README.md` into a themed page and
+publishes *that* at the site root — a green workflow and the wrong site, which is a
+genuinely confusing failure to diagnose. `.nojekyll` in the bundle is the other half of
+the same guard.
 
 `Dockerfile` pins **3.12**, not 3.14, for the same wheel reason as above — every
 dependency has a cp312 manylinux wheel, so the image needs no compiler. The

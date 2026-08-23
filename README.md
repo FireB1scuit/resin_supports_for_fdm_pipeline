@@ -4,7 +4,7 @@ Drop in any STL. Get it back fitted with **resin-style supports that an FDM
 printer can actually make** — a scaffold of thin vertical shafts, cross-linked
 into a lattice, ending in tiny snap-off contact tips — ready to slice.
 
-**[Try it in your browser →](https://firebiscuit.github.io/resin_supports_for_fdm_pipeline/)**
+**[Try it in your browser →](https://fireb1scuit.github.io/resin_supports_for_fdm_pipeline/)**
 Nothing to install, and your model never leaves your machine — see
 [Running it in a browser](#running-it-in-a-browser).
 
@@ -112,7 +112,7 @@ There is a second build that has **no server at all**. The whole pipeline —
 slicing, overhang detection, point placement, collision, the scaffold, the
 export — runs inside the tab, as WebAssembly.
 
-**<https://firebiscuit.github.io/resin_supports_for_fdm_pipeline/>**
+**<https://fireb1scuit.github.io/resin_supports_for_fdm_pipeline/>**
 
 What that means in practice:
 
@@ -148,7 +148,8 @@ python -m http.server -d dist 8000     # or copy dist/ to any static host
 The output is plain files. Any static host serves it — GitHub Pages,
 Cloudflare Pages, Netlify, S3, a directory on a NAS. There is no runtime cost
 per user because there is no runtime: every visitor's own machine does the work.
-Pushing to `main` publishes it automatically via `.github/workflows/pages.yml`.
+Merging to the default branch publishes it automatically via
+`.github/workflows/pages.yml`.
 
 ## The workflow
 
