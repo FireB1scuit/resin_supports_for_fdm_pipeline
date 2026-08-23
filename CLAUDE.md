@@ -316,7 +316,7 @@ python -m http.server -d dist 8000         # ...served like any other files
 ```
 
 Merging to the **default branch** publishes the bundle to GitHub Pages via
-`.github/workflows/pages.yml` — <https://firebiscuit.github.io/resin_supports_for_fdm_pipeline/>.
+`.github/workflows/pages.yml` — <https://fireb1scuit.github.io/resin_supports_for_fdm_pipeline/>.
 
 **The default branch is `feat/pipeline-foundation`, not `main`.** There is no `main`
 branch on the remote and never has been; the git rules at the top of this file name one

@@ -4,7 +4,7 @@ Drop in any STL. Get it back fitted with **resin-style supports that an FDM
 printer can actually make** — a scaffold of thin vertical shafts, cross-linked
 into a lattice, ending in tiny snap-off contact tips — ready to slice.
 
-**[Try it in your browser →](https://firebiscuit.github.io/resin_supports_for_fdm_pipeline/)**
+**[Try it in your browser →](https://fireb1scuit.github.io/resin_supports_for_fdm_pipeline/)**
 Nothing to install, and your model never leaves your machine — see
 [Running it in a browser](#running-it-in-a-browser).
 
@@ -112,7 +112,7 @@ There is a second build that has **no server at all**. The whole pipeline —
 slicing, overhang detection, point placement, collision, the scaffold, the
 export — runs inside the tab, as WebAssembly.
 
-**<https://firebiscuit.github.io/resin_supports_for_fdm_pipeline/>**
+**<https://fireb1scuit.github.io/resin_supports_for_fdm_pipeline/>**
 
 What that means in practice:
 
