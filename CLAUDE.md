@@ -315,8 +315,15 @@ python scripts/build_web.py dist/          # the static, serverless bundle
 python -m http.server -d dist 8000         # ...served like any other files
 ```
 
-Merging to `main` publishes the bundle to GitHub Pages via
+Merging to the **default branch** publishes the bundle to GitHub Pages via
 `.github/workflows/pages.yml` — <https://firebiscuit.github.io/resin_supports_for_fdm_pipeline/>.
+
+**The default branch is `feat/pipeline-foundation`, not `main`.** There is no `main`
+branch on the remote and never has been; the git rules at the top of this file name one
+that does not exist. Read every "`main`" in them as "the default branch" until the
+branch is actually created and switched to. This matters beyond pedantry: a workflow
+keyed to `main` never fires, which is exactly how the first Pages deploy silently did
+nothing.
 The workflow gates on `tests/test_build_web.py` and `tests/test_browser.py` before
 deploying, because a mis-built bundle loads fine and then fails every request. It is
 a third *consumer* of `scripts/build_web.py`, never a second copy of what it does —

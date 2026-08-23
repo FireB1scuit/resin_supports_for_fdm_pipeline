@@ -12,8 +12,13 @@ name: pages
 
 on:
   push:
-    branches: [main]
-  # So a branch can be published for a look before it is merged.
+    # `feat/pipeline-foundation` is this repo's **default branch** and what
+    # everything merges into — there is no `main`, despite what the git rules
+    # in CLAUDE.md call it. Publishing is wired to the branch that actually
+    # exists; `main` is listed too so this keeps working if one is ever made.
+    branches: [feat/pipeline-foundation, main]
+  # Only offered by GitHub for workflows on the default branch, so this becomes
+  # available once this file is merged there.
   workflow_dispatch:
 
 permissions:

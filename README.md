@@ -148,7 +148,8 @@ python -m http.server -d dist 8000     # or copy dist/ to any static host
 The output is plain files. Any static host serves it — GitHub Pages,
 Cloudflare Pages, Netlify, S3, a directory on a NAS. There is no runtime cost
 per user because there is no runtime: every visitor's own machine does the work.
-Pushing to `main` publishes it automatically via `.github/workflows/pages.yml`.
+Merging to the default branch publishes it automatically via
+`.github/workflows/pages.yml`.
 
 ## The workflow
 
