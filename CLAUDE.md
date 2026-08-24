@@ -329,6 +329,48 @@ deploying, because a mis-built bundle loads fine and then fails every request. I
 a third *consumer* of `scripts/build_web.py`, never a second copy of what it does —
 if the bundle needs to change, change the script.
 
+**A branch is never published — test it on localhost.** Pages only ever builds the
+default branch, and that is deliberate: nothing on a `feat/…` branch reaches the site, so
+there is no branch preview to open. Do **not** add branches to the `on: push` list in
+`pages.yml` to "see it live" — there is one site and every deploy overwrites it, so a
+branch build quietly replaces the published app with unmerged work. Reproduce it locally
+instead, and reproduce the *right one*: there are two front ends and they take two loops.
+
+- **The served app** — `web/app.py`, http transport, polygon avoidance:
+
+  ```bash
+  python -m rsupport.web          # http://127.0.0.1:8000, add --port to run two
+  ```
+
+  Checking the branch out is the whole setup; the package is installed `-e`, and
+  `_RevalidatingStatic` sends `no-cache`, so a JS edit needs only a refresh. This path
+  never touches Pyodide, `browser.py` or the raster backend, so it working says nothing
+  about whether the site will.
+
+- **What Pages will actually serve** — `browser.py`, worker transport, raster avoidance:
+
+  ```bash
+  python scripts/build_web.py dist
+  python -m http.server -d dist 8000
+  ```
+
+  `build_web.py` rewrites `config.js` to `'worker'`, so this is the real serverless build.
+  Two things bite here. It is a copy, not a watcher: every edit to `static/` or to the
+  package needs a rebuild before the tab can show it, and `dist/` is gitignored so a stale
+  bundle from another branch sits there looking current. And `http.server` sends no cache
+  headers, which brings back exactly the failure `_RevalidatingStatic` exists to prevent —
+  hard-reload or keep DevTools' "Disable cache" on, or you get the new `index.html`
+  driving a cached `app.js`. Pyodide itself comes from the CDN, so the first load needs
+  network.
+
+Before opening the PR, run what the workflow gates on — `python -m pytest
+tests/test_build_web.py tests/test_browser.py` — and the whole suite the browser's way
+(`RSUPPORT_AVOIDANCE=raster python -m pytest`; on PowerShell
+`$env:RSUPPORT_AVOIDANCE='raster'; python -m pytest`), because the deployed bundle runs
+the raster backend and nothing else exercises it. To hold a branch next to what is live,
+`git worktree add ../rsfp-default feat/pipeline-foundation` and build that into its own
+directory on another port instead of stashing back and forth.
+
 **What Pages serves is the app, not the docs.** The workflow's `actions/configure-pages`
 step sets the Pages source to "GitHub Actions" on every run. Drop that step and the repo
 reverts to "Deploy from a branch", where Jekyll renders `README.md` into a themed page and
