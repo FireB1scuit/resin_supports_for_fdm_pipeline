@@ -235,6 +235,7 @@ function syncSliders(p) {
   if (p.printable_overhang_deg != null) {
     $('braceangle').min = Math.round(90 - p.printable_overhang_deg);
     $('braceangle').max = Math.round(p.printable_overhang_deg);
+    mirrorRange('braceangle');
   }
   if (p.brace_angle_deg != null) $('braceangle').value = p.brace_angle_deg;
   $('tipstyle').value = p.tip_style;
@@ -245,29 +246,86 @@ function syncSliders(p) {
   showSliderValues();
 }
 
-function showSliderValues() {
-  $('tip_v').textContent = (+$('tip').value).toFixed(2) + ' mm';
-  $('shaft_v').textContent = (+$('shaft').value).toFixed(1) + ' mm';
-  $('spacing_v').textContent = (+$('spacing').value).toFixed(2) + ' mm';
-  $('overhang_v').textContent = $('overhang').value + '°';
-  $('lean_v').textContent = $('lean').value + '°';
-  $('parenting_v').textContent = (+$('parenting').value).toFixed(2);
-  $('lift_v').textContent = (+$('lift').value).toFixed(1) + ' mm';
-  $('base_v').textContent = (+$('base').value).toFixed(1) + ' mm';
-  $('baseh_v').textContent = (+$('baseh').value).toFixed(1) + ' mm';
-  $('cone_v').textContent = (+$('cone').value).toFixed(1) + ' mm';
-  $('coneh_v').textContent = (+$('coneh').value).toFixed(1) + ' mm';
-  $('bracethick_v').textContent = (+$('bracethick').value).toFixed(2) + ' mm';
-  $('bracespan_v').textContent = (+$('bracespan').value).toFixed(1) + ' mm';
-  $('braceangle_v').textContent = $('braceangle').value + '°';
-  $('braceheadroom_v').textContent = (+$('braceheadroom').value).toFixed(1) + ' mm';
-  $('bracespacing_v').textContent = (+$('bracespacing').value).toFixed(1) + ' mm';
-  $('bracestart_v').textContent = (+$('bracestart').value).toFixed(1) + ' mm';
+//
+// Every slider has a number box beside it holding the same value, so a value
+// can be typed as well as dragged. The slider stays the one thing the rest of
+// the app reads; the box only ever writes into it.
+//
+const DECIMALS = {
+  tip: 2, shaft: 1, spacing: 2, overhang: 0, lean: 0, parenting: 2, lift: 1,
+  base: 1, baseh: 1, cone: 1, coneh: 1,
+  bracethick: 2, bracespan: 1, braceangle: 0, braceheadroom: 1,
+  bracespacing: 1, bracestart: 1,
+  rotx: 0, roty: 0, rotz: 0,
+};
+const VALUE_IDS = ['tip', 'shaft', 'spacing', 'overhang', 'lean', 'parenting', 'lift',
+                   'base', 'baseh', 'cone', 'coneh', 'bracethick', 'bracespan',
+                   'braceangle', 'braceheadroom', 'bracespacing', 'bracestart'];
+const ROTATION_IDS = ['rotx', 'roty', 'rotz'];
+
+/** Put the slider's value in its box — unless the box is the thing being typed
+ *  in, in which case leave what is half-typed alone. `was` rides along as the
+ *  last value the app actually acted on, which is what a typed value has to
+ *  differ from to be worth re-running. */
+function showValue(id) {
+  const box = $(id + '_v');
+  if (box === document.activeElement) return;
+  box.value = (+$(id).value).toFixed(DECIMALS[id]);
+  box.dataset.was = $(id).value;
 }
-['tip', 'shaft', 'spacing', 'overhang', 'lean', 'parenting', 'lift', 'base', 'baseh',
- 'cone', 'coneh',
- 'bracethick', 'bracespan', 'braceangle', 'braceheadroom', 'bracespacing', 'bracestart']
-  .forEach(id => $(id).addEventListener('input', showSliderValues));
+
+function showSliderValues() { VALUE_IDS.forEach(showValue); }
+function showRotationValues() { ROTATION_IDS.forEach(showValue); }
+
+/** The box borrows the slider's range so typing past either end is pulled back
+ *  in, and so the arrow keys step by the same amount the slider does. */
+function mirrorRange(id) {
+  const s = $(id), box = $(id + '_v');
+  box.min = s.min;
+  box.max = s.max;
+  box.step = s.dataset.step;
+}
+
+/** Take what was typed: clamp it into range, round it to the digits the box
+ *  shows, hand it to the slider, and re-run whatever a dragged slider re-runs.
+ *  A typed value is honoured exactly even between the slider's notches — the
+ *  notches come back the moment the slider itself is touched again. */
+function commitTyped(id) {
+  const s = $(id), box = $(id + '_v');
+  // The slider has been following along keystroke by keystroke, so it is no
+  // use as a before-and-after — compare against the last value the app ran on.
+  const before = box.dataset.was != null ? +box.dataset.was : +s.value;
+  const typed = parseFloat(box.value);
+  if (Number.isFinite(typed)) {
+    s.step = 'any';
+    s.value = +Math.min(Math.max(typed, +s.min), +s.max).toFixed(DECIMALS[id]);
+  }
+  box.value = (+s.value).toFixed(DECIMALS[id]);  // gibberish just reverts
+  box.dataset.was = s.value;
+  if (+s.value !== before) s.dispatchEvent(new Event('change'));
+}
+
+function bindValueBox(id) {
+  const s = $(id), box = $(id + '_v');
+  s.dataset.step = s.step;
+  mirrorRange(id);
+  // Touching the slider itself puts it back on its own increments.
+  ['pointerdown', 'keydown'].forEach(ev => s.addEventListener(ev, () => { s.step = s.dataset.step; }));
+  s.addEventListener('input', () => showValue(id));
+  s.addEventListener('change', () => { box.dataset.was = s.value; });
+  // While typing, the slider follows along — but nothing re-runs until commit.
+  box.addEventListener('input', () => {
+    const v = parseFloat(box.value);
+    if (Number.isFinite(v) && v >= +s.min && v <= +s.max) { s.step = 'any'; s.value = v; }
+  });
+  box.addEventListener('change', () => commitTyped(id));
+  box.addEventListener('blur', () => commitTyped(id));
+  box.addEventListener('keydown', (e) => { if (e.key === 'Enter') box.blur(); });
+  box.addEventListener('focus', () => box.select());
+  showValue(id);
+}
+
+VALUE_IDS.concat(ROTATION_IDS).forEach(bindValueBox);
 
 // ---------------------------------------------------------------- pipeline
 
@@ -330,15 +388,7 @@ async function rerotate() {
   }
 }
 
-function showRotationValues() {
-  $('rotx_v').textContent = $('rotx').value + '°';
-  $('roty_v').textContent = $('roty').value + '°';
-  $('rotz_v').textContent = $('rotz').value + '°';
-}
-['rotx', 'roty', 'rotz'].forEach(id => {
-  $(id).addEventListener('input', showRotationValues);
-  $(id).addEventListener('change', rerotate);
-});
+ROTATION_IDS.forEach(id => $(id).addEventListener('change', rerotate));
 
 $('asloaded').onclick = () => {
   $('rotx').value = 0; $('roty').value = 0; $('rotz').value = 0;
@@ -414,6 +464,99 @@ async function rerun(scope) {
     busy(false);
   }
 }
+
+// ------------------------------------------------------------------ panel
+
+//
+// The sections of dials fold away, and which ones are open is remembered — the
+// panel you left is the panel you come back to. A first visit gets them all
+// shut, which is the whole point: ten headings you can read at a glance rather
+// than a hundred-row scroll.
+//
+const FOLDS_KEY = 'rsupport.folds';
+
+function readFolds() {
+  try { return new Set(JSON.parse(localStorage.getItem(FOLDS_KEY) || '[]')); }
+  catch { return new Set(); }
+}
+
+const openFolds = readFolds();
+document.querySelectorAll('details.fold').forEach((d) => {
+  d.open = openFolds.has(d.dataset.fold);
+  d.addEventListener('toggle', () => {
+    if (d.open) openFolds.add(d.dataset.fold); else openFolds.delete(d.dataset.fold);
+    try { localStorage.setItem(FOLDS_KEY, JSON.stringify([...openFolds])); } catch { /* private mode */ }
+    hideHelp();
+  });
+});
+
+//
+// Each dial explains itself on hover. The bubble is placed out over the canvas,
+// clear of the panel, because the description is no use if it covers the thing
+// being described — you have to see what you are dragging while you read what
+// it does. Only when there is no canvas to the left (the stacked layout) does
+// it go above or below the row instead, still never on top of it.
+//
+const help = document.createElement('div');
+help.id = 'help';
+document.body.appendChild(help);
+
+let helpRow = null;
+
+function hideHelp() {
+  helpRow = null;
+  help.classList.remove('on');
+}
+
+function showHelp(row) {
+  if (row === helpRow) return;
+  helpRow = row;
+  help.innerHTML = row.dataset.help;
+
+  const GAP = 10;
+  const r = row.getBoundingClientRect();
+  const panel = $('panel').getBoundingClientRect();
+
+  // Measure where it will not be clipped, then place it.
+  help.className = 'on';
+  help.style.left = '0px';
+  help.style.top = '0px';
+  const w = help.offsetWidth, h = help.offsetHeight;
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(v, hi));
+
+  if (panel.left >= w + GAP * 2) {
+    const top = clamp(r.top + r.height / 2 - h / 2, GAP, innerHeight - h - GAP);
+    help.classList.add('at-left');
+    help.style.left = `${panel.left - w - GAP}px`;
+    help.style.top = `${top}px`;
+    help.style.setProperty('--point', `${clamp(r.top + r.height / 2 - top, 10, h - 10)}px`);
+  } else {
+    const above = r.top - h - GAP >= GAP;
+    const left = clamp(r.left, GAP, innerWidth - w - GAP);
+    help.classList.add(above ? 'at-top' : 'at-bottom');
+    help.style.left = `${left}px`;
+    help.style.top = `${above ? r.top - h - GAP : r.bottom + GAP}px`;
+    help.style.setProperty('--point', `${clamp(r.left + 26 - left, 12, w - 12)}px`);
+  }
+}
+
+const panelEl = $('panel');
+panelEl.addEventListener('pointerover', (e) => {
+  const row = e.target.closest('.row[data-help]');
+  if (row) showHelp(row); else hideHelp();
+});
+panelEl.addEventListener('pointerleave', hideHelp);
+// Tabbing through the panel is the same journey without a mouse.
+panelEl.addEventListener('focusin', (e) => {
+  const row = e.target.closest('.row[data-help]');
+  if (row) showHelp(row);
+});
+panelEl.addEventListener('focusout', (e) => {
+  if (!e.relatedTarget || !e.relatedTarget.closest('.row[data-help]')) hideHelp();
+});
+// A bubble pinned to a row that has since scrolled away is pointing at nothing.
+$('scroll').addEventListener('scroll', hideHelp);
+addEventListener('resize', hideHelp);
 
 // ------------------------------------------------------------- interaction
 

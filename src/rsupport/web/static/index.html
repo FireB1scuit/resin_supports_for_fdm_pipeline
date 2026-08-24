@@ -73,10 +73,79 @@
     color: var(--dim); margin: 0 0 8px; font-weight: 600;
   }
 
+  /* The dials fold away behind their heading. What is not a dial — the printer,
+     the pose, the result, the download — stays open: folding a three-button
+     export behind a click helps nobody. */
+  details.fold { border-top: 1px solid var(--line); }
+  details.fold > summary {
+    display: flex; align-items: center; gap: 7px;
+    padding: 9px 0; cursor: pointer; user-select: none; list-style: none;
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: .09em;
+    color: var(--dim); font-weight: 600;
+  }
+  details.fold > summary::-webkit-details-marker { display: none; }
+  details.fold > summary::before {
+    content: ""; flex: none; width: 5px; height: 5px; margin-left: 2px;
+    border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+    transform: rotate(-45deg); transition: transform .12s;
+  }
+  details.fold[open] > summary { color: var(--text); }
+  details.fold[open] > summary::before { transform: rotate(45deg); margin-top: -3px; }
+  details.fold > summary:hover { color: var(--text); }
+  details.fold:last-of-type { border-bottom: 1px solid var(--line); }
+  details.fold > .row:last-child { margin-bottom: 11px; }
+  .row[data-help] label { cursor: help; }
+  .row[data-help]:hover label { color: var(--text); }
+
+  /* Each dial explains itself on hover, and the explanation goes out over the
+     canvas rather than over the panel — you have to be able to see the thing
+     you are touching while you read what it does. */
+  #help {
+    position: fixed; z-index: 20; width: max-content; max-width: 268px;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 10px; font-size: 11.5px; line-height: 1.5; color: var(--text);
+    box-shadow: 0 10px 28px rgba(0,0,0,.5);
+    pointer-events: none; opacity: 0; transition: opacity .09s;
+  }
+  #help.on { opacity: 1; }
+  #help::after {
+    content: ""; position: absolute; width: 7px; height: 7px;
+    background: var(--panel-2); border: 1px solid var(--line);
+  }
+  #help.at-left::after {
+    right: -4.5px; top: var(--point, 50%); margin-top: -4px;
+    border-width: 1px 1px 0 0; transform: rotate(45deg);
+  }
+  #help.at-top::after {
+    bottom: -4.5px; left: var(--point, 24px); margin-left: -4px;
+    border-width: 0 1px 1px 0; transform: rotate(45deg);
+  }
+  #help.at-bottom::after {
+    top: -4.5px; left: var(--point, 24px); margin-left: -4px;
+    border-width: 1px 0 0 1px; transform: rotate(45deg);
+  }
+
   .row { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
-  .row label { flex: 1; color: var(--dim); }
-  .row output { font-variant-numeric: tabular-nums; min-width: 40px; text-align: right; }
-  input[type=range] { width: 108px; accent-color: var(--accent); }
+  .row label { flex: 1; min-width: 0; color: var(--dim); }
+  input[type=range] { flex: 0 1 96px; min-width: 52px; accent-color: var(--accent); }
+
+  /* The number beside a slider is the same value, typed instead of dragged.
+     It reads as a readout until you click into it. */
+  .num {
+    display: inline-flex; align-items: baseline; gap: 3px;
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 6px; padding: 2px 5px;
+  }
+  .num:focus-within { border-color: var(--accent); }
+  .num input {
+    width: 38px; padding: 0; border: 0; background: none; color: var(--text);
+    font: inherit; font-variant-numeric: tabular-nums; text-align: right;
+    -moz-appearance: textfield;
+  }
+  .num input:focus { outline: none; }
+  .num input::-webkit-outer-spin-button,
+  .num input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .num i { font-style: normal; font-size: 10.5px; color: var(--dim); }
   select, button {
     background: var(--panel-2); color: var(--text);
     border: 1px solid var(--line); border-radius: 7px;
@@ -116,11 +185,22 @@
 
   /* A fixed 296px panel eats a narrow window alive — at 430px the viewport is
      left with 130px of canvas. Shrink, then stack. */
-  @media (max-width: 900px) { body { grid-template-columns: 1fr 244px; } }
+  @media (max-width: 900px) {
+    body { grid-template-columns: 1fr 244px; }
+    /* 244px of panel, less a scrollbar, does not hold a full-width slider and
+       a number box without eating the label. Give the value the room. */
+    input[type=range] { flex: 0 1 60px; }
+    .num { padding: 2px 4px; }
+    .num input { width: 30px; }
+  }
   @media (max-width: 680px) {
     body { grid-template-columns: 1fr; grid-template-rows: minmax(240px, 50vh) 1fr; }
     aside { border-left: none; border-top: 1px solid var(--line); }
     #legend { display: none; }
+    /* Stacked, the panel is the full window again — take the room back. */
+    input[type=range] { flex: 0 1 96px; }
+    .num { padding: 2px 5px; }
+    .num input { width: 38px; }
   }
   .spinner {
     width: 26px; height: 26px; border-radius: 50%;
@@ -160,13 +240,13 @@
   </div>
 </div>
 
-<aside>
+<aside id="panel">
   <header>
     <div class="title">resin supports for FDM</div>
     <div class="sub" id="filename">no model loaded</div>
   </header>
 
-  <div class="scroll">
+  <div class="scroll" id="scroll">
     <section>
       <h2>printer</h2>
       <div class="row">
@@ -175,171 +255,167 @@
       <select id="preset"></select>
     </section>
 
-    <section>
-      <h2>model</h2>
-      <div class="row">
+    <details class="fold" data-fold="model">
+      <summary>model</summary>
+      <div class="row" data-help="The model floats this far above the plate and hangs off the
+           scaffold, the way a resin print does. Its underside then gets supported like any
+           other overhang &mdash; no elephant&rsquo;s foot, no squashed first layer. 0 sets it
+           down flat.">
         <label for="lift">lift off plate</label>
         <input type="range" id="lift" min="0" max="20" step=".5">
-        <output id="lift_v"></output>
+        <span class="num"><input type="number" id="lift_v" aria-label="lift value"><i>mm</i></span>
       </div>
-      <p style="color:var(--dim); font-size:11px; margin:2px 0 0">
-        The model floats this far above the plate and hangs off the scaffold, the
-        way a resin print does. Its underside gets supported like any other
-        overhang &mdash; no elephant&rsquo;s foot, no squashed first layer.
-        <b>0</b> sets it down flat.
-      </p>
-    </section>
+    </details>
 
-    <section>
-      <h2>structure</h2>
-      <div class="row">
+    <details class="fold" data-fold="structure">
+      <summary>structure</summary>
+      <div class="row" data-help="How hard the arms gather tips onto a shared shaft. 0 gives every
+           contact a shaft of its own; 1 reaches as far as the lean allows, so far fewer shafts
+           stand on the plate.">
         <label for="parenting">parenting</label>
         <input type="range" id="parenting" min="0" max="1" step=".05">
-        <output id="parenting_v"></output>
+        <span class="num"><input type="number" id="parenting_v" aria-label="parenting value"></span>
       </div>
-      <div class="row">
+      <div class="row" data-help="How far anything may tip off vertical before it stops printing.
+           A strut leaning by this much overhangs by exactly that &mdash; and it is also how far a
+           shaft can travel sideways per layer, so it decides how well the scaffold routes around
+           the model.">
         <label for="lean">strut lean</label>
         <input type="range" id="lean" min="20" max="48" step="1">
-        <output id="lean_v"></output>
+        <span class="num"><input type="number" id="lean_v" aria-label="lean value"><i>&deg;</i></span>
       </div>
-      <p style="color:var(--dim); font-size:11px; margin:2px 0 0">
-        SLA scaffold: tips on angled arms, thin vertical shafts, cross-linked.
-        Parenting is how many tips share a shaft; lean is how far anything may
-        tip off vertical before it stops printing.
-      </p>
-    </section>
+    </details>
 
-    <section>
-      <h2>supports</h2>
-      <div class="row">
+    <details class="fold" data-fold="supports">
+      <summary>supports</summary>
+      <div class="row" data-help="How wide the support is where it touches the model. Thinner
+           leaves less of a scar and snaps off more easily; too thin and the nozzle cannot lay it
+           down at all.">
         <label for="tip">tip &oslash;</label>
         <input type="range" id="tip" min=".2" max=".8" step=".05">
-        <output id="tip_v"></output>
+        <span class="num"><input type="number" id="tip_v" aria-label="tip value"><i>mm</i></span>
       </div>
-      <div class="row">
+      <div class="row" data-help="Width of a vertical shaft at its foot. It tapers slightly on the
+           way up and never thickens into a trunk &mdash; the scaffold carries the model on many
+           thin shafts rather than a few fat ones.">
         <label for="shaft">shaft &oslash;</label>
         <input type="range" id="shaft" min=".8" max="2.5" step=".1">
-        <output id="shaft_v"></output>
+        <span class="num"><input type="number" id="shaft_v" aria-label="shaft value"><i>mm</i></span>
       </div>
-      <div class="row">
+      <div class="row" data-help="How far apart contacts sit on a surface right at the overhang
+           threshold. Steeper faces are packed tighter than this, down to half of it where a face
+           points straight down.">
         <label for="spacing">spacing</label>
         <input type="range" id="spacing" min="1.5" max="8" step=".25">
-        <output id="spacing_v"></output>
+        <span class="num"><input type="number" id="spacing_v" aria-label="spacing value"><i>mm</i></span>
       </div>
-      <div class="row">
+      <div class="row" data-help="Which downward faces are counted as needing holding up. The sign
+           is the opposite of a slicer&rsquo;s slider: a larger angle flags more faces, because it
+           widens the cone of normals counted as pointing down.">
         <label for="overhang">overhang</label>
         <input type="range" id="overhang" min="30" max="70" step="1">
-        <output id="overhang_v"></output>
+        <span class="num"><input type="number" id="overhang_v" aria-label="overhang value"><i>&deg;</i></span>
       </div>
-      <div class="row">
+      <div class="row" data-help="Shape of the contact. Conical narrows to a point; spherical is a
+           dome rather than a ball, because a ball&rsquo;s underside is a 90&deg; overhang.">
         <label for="tipstyle">tip style</label>
         <select id="tipstyle" style="width:auto">
           <option value="conical">conical</option>
           <option value="spherical">spherical</option>
         </select>
       </div>
-      <div class="row">
+      <div class="row" data-help="Shafts lean around whatever is in the way to reach the plate. A
+           contact with no route down at all is left unheld and reported, rather than propped off
+           the sculpt. Supports that start on the model are not implemented yet, so unticking this
+           only lets a blocked shaft stop where it is.">
         <label for="plateonly">supports from plate only</label>
         <input type="checkbox" id="plateonly" checked>
       </div>
-      <p style="color:var(--dim); font-size:11px; margin:2px 0 0">
-        Shafts lean around whatever is in the way to reach the plate. A contact
-        with no route down at all is left unheld and reported, rather than
-        propped off the sculpt. Supports that <em>start</em> on the model are
-        not implemented yet, so unticking this only lets a blocked shaft stop
-        where it is.
-      </p>
-    </section>
+    </details>
 
-    <section>
-      <h2>cross-links</h2>
-      <div class="row">
+    <details class="fold" data-fold="crosslinks">
+      <summary>cross-links</summary>
+      <div class="row" data-help="Diagonal ties between shafts that are actually next to each
+           other, laid on heights the whole field shares. They are what keeps a scaffold of thin
+           shafts from wandering as it grows.">
         <label for="braces">cross-links</label>
         <input type="checkbox" id="braces" checked>
       </div>
-      <div class="row">
+      <div class="row" data-help="How thick each tie is. It is a tie, not a pillar &mdash; thick
+           enough to hold the shafts to each other, thin enough to get through afterwards.">
         <label for="bracethick">link &oslash;</label>
         <input type="range" id="bracethick" min=".3" max="2.5" step=".05">
-        <output id="bracethick_v"></output>
+        <span class="num"><input type="number" id="bracethick_v" aria-label="link diameter value"><i>mm</i></span>
       </div>
-      <div class="row">
+      <div class="row" data-help="How far apart two shafts may be and still be linked.">
         <label for="bracespan">max span</label>
         <input type="range" id="bracespan" min="2" max="25" step=".5">
-        <output id="bracespan_v"></output>
+        <span class="num"><input type="number" id="bracespan_v" aria-label="max span value"><i>mm</i></span>
       </div>
-      <div class="row">
+      <div class="row" data-help="The angle a link is laid at, above horizontal. It only moves
+           inside the band that prints: shallower spans further per millimetre of rise, steeper
+           packs the lattice tighter.">
         <label for="braceangle">link angle</label>
         <input type="range" id="braceangle" min="40" max="50" step="1">
-        <output id="braceangle_v"></output>
+        <span class="num"><input type="number" id="braceangle_v" aria-label="link angle value"><i>&deg;</i></span>
       </div>
-      <div class="row">
+      <div class="row" data-help="How far up the scaffold the links begin, measured from the plate.
+           0 starts them inside the feet, where they cost nothing; raise it to keep the bottom
+           open, where the discs have already merged into a raft and a cutter has to get in
+           first.">
         <label for="bracestart">start height</label>
         <input type="range" id="bracestart" min="0" max="20" step=".5">
-        <output id="bracestart_v"></output>
+        <span class="num"><input type="number" id="bracestart_v" aria-label="start height value"><i>mm</i></span>
       </div>
-      <div class="row">
+      <div class="row" data-help="The height from one link to the next up the same pair of shafts,
+           so a tall pair gets a ladder of them and a short one gets a single rung.">
         <label for="bracespacing">link spacing</label>
         <input type="range" id="bracespacing" min="2" max="20" step=".5">
-        <output id="bracespacing_v"></output>
+        <span class="num"><input type="number" id="bracespacing_v" aria-label="link spacing value"><i>mm</i></span>
       </div>
-      <div class="row">
+      <div class="row" data-help="Clear air kept below the shaft tops &mdash; that is where the
+           arms fan out to the model, so it is the space you need a blade in. It comes out of the
+           height a link has to work with, so raising it drops links on short supports first.">
         <label for="braceheadroom">headroom</label>
         <input type="range" id="braceheadroom" min="0" max="8" step=".1">
-        <output id="braceheadroom_v"></output>
+        <span class="num"><input type="number" id="braceheadroom_v" aria-label="headroom value"><i>mm</i></span>
       </div>
-      <p style="color:var(--dim); font-size:11px; margin:2px 0 0">
-        Shafts brace against the ones actually next to them, on heights the whole
-        field shares. <b>Max span</b> is how far apart two may be and still be
-        linked. <b>Start height</b> is how far up the scaffold the links begin,
-        measured from the plate; 0 starts them inside the feet, where they cost
-        nothing. <b>Link spacing</b> is the height from one link to the next up
-        the same pair, so a tall pair gets a ladder of them and a short one gets
-        a single rung. <b>Headroom</b> is clear air kept below the shaft tops —
-        that is where the arms fan out to the model, so it is the space you need
-        a blade in; it comes out of the height a link has to work with, so
-        raising it drops links on short supports first. <b>Link angle</b> only
-        moves inside the band that prints: shallower spans further per
-        millimetre of rise, steeper packs the lattice tighter.
-      </p>
-    </section>
+    </details>
 
-    <section>
-      <h2>base</h2>
-      <div class="row">
+    <details class="fold" data-fold="base">
+      <summary>base</summary>
+      <div class="row" data-help="A disc under every shaft that reaches the plate. Wide enough and
+           neighbouring discs overlap into a single raft, which is what makes a scaffold of thin
+           shafts stay stuck down.">
         <label for="base">base &oslash;</label>
         <input type="range" id="base" min="0" max="15" step=".5">
-        <output id="base_v"></output>
+        <span class="num"><input type="number" id="base_v" aria-label="base diameter value"><i>mm</i></span>
       </div>
-      <div class="row">
+      <div class="row" data-help="How tall that disc is. 0 leaves the shaft standing on its join
+           cone alone.">
         <label for="baseh">base height</label>
         <input type="range" id="baseh" min="0" max="5" step=".1">
-        <output id="baseh_v"></output>
+        <span class="num"><input type="number" id="baseh_v" aria-label="base height value"><i>mm</i></span>
       </div>
-      <p style="color:var(--dim); font-size:11px; margin:2px 0 0">
-        A disc under every shaft that reaches the plate. Wide enough and they
-        overlap into a single raft, which is what makes a scaffold of thin
-        shafts stay stuck down.
-      </p>
-    </section>
+    </details>
 
-    <section>
-      <h2>join cone</h2>
-      <div class="row">
+    <details class="fold" data-fold="joincone">
+      <summary>join cone</summary>
+      <div class="row" data-help="The piece between the base and the shaft. Sized on its own
+           &mdash; it does not grow or shrink with the base above, and it is still there with the
+           base turned off. Never wider than the disc it stands on, since a cone that flared
+           outward would be an overhang.">
         <label for="cone">cone &oslash;</label>
         <input type="range" id="cone" min="0" max="15" step=".5">
-        <output id="cone_v"></output>
+        <span class="num"><input type="number" id="cone_v" aria-label="cone diameter value"><i>mm</i></span>
       </div>
-      <div class="row">
+      <div class="row" data-help="How tall the cone is &mdash; how much of the climb from the
+           plate up to the shaft it does.">
         <label for="coneh">cone height</label>
         <input type="range" id="coneh" min="0" max="5" step=".1">
-        <output id="coneh_v"></output>
+        <span class="num"><input type="number" id="coneh_v" aria-label="cone height value"><i>mm</i></span>
       </div>
-      <p style="color:var(--dim); font-size:11px; margin:2px 0 0">
-        The piece between the base and the shaft. Sized on its own — it does
-        not grow or shrink with the base above, and it is still there even
-        with the base turned off.
-      </p>
-    </section>
+    </details>
 
     <section>
       <h2>orientation</h2>
@@ -350,17 +426,17 @@
       <div class="row">
         <label for="rotx">rotate X</label>
         <input type="range" id="rotx" min="-180" max="180" step="1" value="0">
-        <output id="rotx_v"></output>
+        <span class="num"><input type="number" id="rotx_v" aria-label="rotx value"><i>&deg;</i></span>
       </div>
       <div class="row">
         <label for="roty">rotate Y</label>
         <input type="range" id="roty" min="-180" max="180" step="1" value="0">
-        <output id="roty_v"></output>
+        <span class="num"><input type="number" id="roty_v" aria-label="roty value"><i>&deg;</i></span>
       </div>
       <div class="row">
         <label for="rotz">rotate Z</label>
         <input type="range" id="rotz" min="-180" max="180" step="1" value="0">
-        <output id="rotz_v"></output>
+        <span class="num"><input type="number" id="rotz_v" aria-label="rotz value"><i>&deg;</i></span>
       </div>
       <div class="btns" style="margin-top:6px">
         <button id="asloaded" disabled>file&rsquo;s pose</button>
