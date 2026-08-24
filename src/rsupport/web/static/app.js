@@ -465,6 +465,99 @@ async function rerun(scope) {
   }
 }
 
+// ------------------------------------------------------------------ panel
+
+//
+// The sections of dials fold away, and which ones are open is remembered — the
+// panel you left is the panel you come back to. A first visit gets them all
+// shut, which is the whole point: ten headings you can read at a glance rather
+// than a hundred-row scroll.
+//
+const FOLDS_KEY = 'rsupport.folds';
+
+function readFolds() {
+  try { return new Set(JSON.parse(localStorage.getItem(FOLDS_KEY) || '[]')); }
+  catch { return new Set(); }
+}
+
+const openFolds = readFolds();
+document.querySelectorAll('details.fold').forEach((d) => {
+  d.open = openFolds.has(d.dataset.fold);
+  d.addEventListener('toggle', () => {
+    if (d.open) openFolds.add(d.dataset.fold); else openFolds.delete(d.dataset.fold);
+    try { localStorage.setItem(FOLDS_KEY, JSON.stringify([...openFolds])); } catch { /* private mode */ }
+    hideHelp();
+  });
+});
+
+//
+// Each dial explains itself on hover. The bubble is placed out over the canvas,
+// clear of the panel, because the description is no use if it covers the thing
+// being described — you have to see what you are dragging while you read what
+// it does. Only when there is no canvas to the left (the stacked layout) does
+// it go above or below the row instead, still never on top of it.
+//
+const help = document.createElement('div');
+help.id = 'help';
+document.body.appendChild(help);
+
+let helpRow = null;
+
+function hideHelp() {
+  helpRow = null;
+  help.classList.remove('on');
+}
+
+function showHelp(row) {
+  if (row === helpRow) return;
+  helpRow = row;
+  help.innerHTML = row.dataset.help;
+
+  const GAP = 10;
+  const r = row.getBoundingClientRect();
+  const panel = $('panel').getBoundingClientRect();
+
+  // Measure where it will not be clipped, then place it.
+  help.className = 'on';
+  help.style.left = '0px';
+  help.style.top = '0px';
+  const w = help.offsetWidth, h = help.offsetHeight;
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(v, hi));
+
+  if (panel.left >= w + GAP * 2) {
+    const top = clamp(r.top + r.height / 2 - h / 2, GAP, innerHeight - h - GAP);
+    help.classList.add('at-left');
+    help.style.left = `${panel.left - w - GAP}px`;
+    help.style.top = `${top}px`;
+    help.style.setProperty('--point', `${clamp(r.top + r.height / 2 - top, 10, h - 10)}px`);
+  } else {
+    const above = r.top - h - GAP >= GAP;
+    const left = clamp(r.left, GAP, innerWidth - w - GAP);
+    help.classList.add(above ? 'at-top' : 'at-bottom');
+    help.style.left = `${left}px`;
+    help.style.top = `${above ? r.top - h - GAP : r.bottom + GAP}px`;
+    help.style.setProperty('--point', `${clamp(r.left + 26 - left, 12, w - 12)}px`);
+  }
+}
+
+const panelEl = $('panel');
+panelEl.addEventListener('pointerover', (e) => {
+  const row = e.target.closest('.row[data-help]');
+  if (row) showHelp(row); else hideHelp();
+});
+panelEl.addEventListener('pointerleave', hideHelp);
+// Tabbing through the panel is the same journey without a mouse.
+panelEl.addEventListener('focusin', (e) => {
+  const row = e.target.closest('.row[data-help]');
+  if (row) showHelp(row);
+});
+panelEl.addEventListener('focusout', (e) => {
+  if (!e.relatedTarget || !e.relatedTarget.closest('.row[data-help]')) hideHelp();
+});
+// A bubble pinned to a row that has since scrolled away is pointing at nothing.
+$('scroll').addEventListener('scroll', hideHelp);
+addEventListener('resize', hideHelp);
+
 // ------------------------------------------------------------- interaction
 
 const raycaster = new THREE.Raycaster();
