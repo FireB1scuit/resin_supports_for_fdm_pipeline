@@ -142,6 +142,17 @@ function log(msg, cls = '') {
   const tail = $('logtail');
   tail.textContent = msg;
   tail.className = cls;
+  // While something is running, the badge over the canvas says which stage it
+  // is in rather than a generic "working" — the stage names are already being
+  // written here, and "placing support points" is a more useful thing to be
+  // told than that the app is busy.
+  if (state.busy) setWorking(msg);
+}
+
+/** The canvas-corner badge's label. The trailing ellipsis the log uses to mean
+ *  "in progress" is redundant next to a spinner. */
+function setWorking(msg) {
+  $('worktext').textContent = (msg || 'working').replace(/\s*…\s*$/, '');
 }
 
 /** Two flavours of wait, because they interrupt differently.
@@ -155,8 +166,12 @@ function log(msg, cls = '') {
 function busy(on, heavy = false) {
   state.busy = on;
   $('prog').classList.toggle('on', on);
+  // The badge rides on the canvas, so it is redundant behind the full overlay —
+  // that already has a spinner of its own in the middle of the view.
+  $('work').classList.toggle('on', on && !heavy);
   $('busy').classList.toggle('on', on && heavy);
-  if (!on) $('busy').classList.remove('on');
+  if (on) setWorking($('logtail').textContent);
+  else $('busy').classList.remove('on');
 }
 
 // ---------------------------------------------------------------- api

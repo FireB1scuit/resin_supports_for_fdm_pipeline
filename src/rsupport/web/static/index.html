@@ -312,12 +312,36 @@
     animation: spin .7s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* The bar under the panel header answers "is it working?" for somebody
+     already looking at the panel. Anyone watching the model is looking at the
+     other side of the window, so the same answer is repeated in the corner of
+     the canvas — opposite the layer chips, out of the way of the model. */
+  #work {
+    position: absolute; right: 12px; top: 12px; z-index: 4;
+    display: flex; align-items: center; gap: 7px;
+    background: rgba(15,17,21,.72); border: 1px solid var(--line);
+    border-radius: 7px; padding: 5px 9px; font-size: 11.5px; color: var(--dim);
+    opacity: 0; transition: opacity .12s; pointer-events: none;
+  }
+  #work.on { opacity: 1; }
+  #work .spinner {
+    width: 12px; height: 12px; border-width: 1.5px;
+  }
+  #worktext { white-space: nowrap; }
+  /* Narrow enough and the label would crowd the model — the spinner alone
+     still says the thing. */
+  @media (max-width: 560px) {
+    #worktext { display: none; }
+  }
 </style>
 </head>
 <body>
 
 <div id="stage">
   <canvas id="canvas"></canvas>
+
+  <div id="work"><div class="spinner"></div><span id="worktext">working</span></div>
 
   <div id="hud">
     <button class="chip on" data-toggle="model">model</button>

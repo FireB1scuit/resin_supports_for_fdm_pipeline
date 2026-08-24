@@ -26,45 +26,55 @@ from make_sample import build as build_sample  # noqa: E402
 
 from test_supports import printability_report  # noqa: E402
 
-# The pipeline still leaves a handful of flat undersides overhanging where a
-# support lands on a feature narrower than itself. They are short bridges off
-# anchored material, not floating islands, and they are reported in
-# SupportBuild.warnings. This is the measured budget, not an aspiration — if it
-# rises, something regressed; if it falls, tighten it.
-# Restricting supports to the plate all but emptied this: a shaft that would have
-# balanced on a feature narrower than itself now either routes past it to the bed
-# or is refused, and the flat undersides were nearly all on those landings. It
-# fell from 0.2% to a measured 0.023%, so it is tightened to match. Do not raise
-# it to make a test pass.
-VIOLATION_BUDGET = 0.0004  # fraction of support faces
+# Flat undersides left overhanging where a support lands on a feature narrower
+# than itself. They are short bridges off anchored material, not floating
+# islands, and they are reported in SupportBuild.warnings. This is the measured
+# budget, not an aspiration — if it rises, something regressed; if it falls,
+# tighten it.
+#
+# It has now fallen to nothing. Restricting supports to the plate took it from
+# 0.2% to 0.023%, because a shaft that would have balanced on a narrow feature
+# either routes past it to the bed or is refused; moving the sample's head off
+# the body axis took the rest, because the contacts that were still landing on
+# something too narrow were on the head, and a head standing in free air is
+# reached from below instead. Measured 0 of 246,996 support faces across every
+# preset on the polygon backend and 0 of 239,824 on the raster one, flat and
+# lifted. So the budget is zero, and a single overhanging face is now a
+# regression. Do not raise it to make a test pass.
+VIOLATION_BUDGET = 0.0  # fraction of support faces
 
 # A dropped contact is an overhang left unheld, so it has to stay rare — but a
 # sculpt can genuinely offer nowhere to stand a support, and refusing to place
 # one is better than placing one through the model. Reported in warnings.
 #
-# There are two budgets because there are two questions. Once a shaft is allowed
-# to route around the model *and* to stand on it as a last resort, almost
-# nothing is unsupportable, so that budget is tight and measures the router.
-# The shipped default is `plate_only`, which additionally refuses to prop a
-# support off the sculpt, and a handful of contacts on this mini genuinely
-# cannot be reached from the plate by anything: they sit in dimples on the upper
-# surface of the head, where every route in — shaft or arm — crosses the head
-# itself. Leaving those unheld is the choice `plate_only` exists to make. Both
-# are measurements, not aspirations.
-DROP_BUDGET = 0.015  # fraction of contact points, with model landings allowed
-PLATE_ONLY_DROP_BUDGET = 0.08  # fraction, restricted to the build plate
-
-# The raster collision backend refuses slightly more contacts than the polygon
-# one, because a lattice cell has to round somewhere and it always rounds toward
-# refusing. Worst case measured across every preset is 8.36% on mini_0.2_dense,
-# against the polygon field's 7.49%; every other preset is under 5%.
+# The shipped default is `plate_only`, which refuses to prop a support off the
+# sculpt, and a handful of contacts on this mini genuinely cannot be reached
+# from the plate by anything. Where they are moved when the sample changed: they
+# used to sit in dimples on the upper surface of the head, back when the head was
+# stacked on the body's axis and every route in crossed the head itself. With the
+# head carried out to the side it is reached from below like anything else, and
+# what is left unheld is the flat underside of the base disc, in the ring where
+# the body capsule hangs below it and blocks the way down. Leaving those unheld
+# is the choice `plate_only` exists to make.
 #
-# This is a **second measurement of a second implementation**, not a relaxation
-# of the one above — PLATE_ONLY_DROP_BUDGET is unchanged and still governs every
-# desktop build. Do not merge the two, and do not raise either to make a test
-# pass. The gap is pure quantisation: at a 0.0375 mm cell the raster field
-# matches the polygon field exactly, and takes 15.4s per build to do it.
-RASTER_PLATE_ONLY_DROP_BUDGET = 0.085
+# Worst case measured across every preset is 4.48% on mini_0.2_sparse; the
+# default pose, which floats the model, drops nothing at all. Measurements, not
+# aspirations.
+PLATE_ONLY_DROP_BUDGET = 0.05  # fraction of contact points, restricted to the plate
+
+# A **second measurement of a second implementation**, not a relaxation of the
+# one above. Do not merge the two and do not raise either to make a test pass.
+#
+# The lattice has to round somewhere and it always rounds toward refusing a
+# position, so the raster field was uniformly the worse of the two and carried
+# the looser budget. On this sample it no longer is: per preset it goes both
+# ways — 4 drops against the polygon field's 3 on mini_0.2, but 8 against 10 on
+# mini_0.2_dense — because refusing one route sends a shaft down a different one,
+# and quantisation is not the only thing that decides whether that one lands.
+# Worst case is 2.99% on mini_0.2_sparse, under the polygon field's worst, so
+# this budget is now the tighter of the two. That is what was measured, not a
+# claim that the raster field has got better.
+RASTER_PLATE_ONLY_DROP_BUDGET = 0.035
 
 
 def _plate_only_drop_budget() -> float:

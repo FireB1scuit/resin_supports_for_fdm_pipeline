@@ -8,6 +8,7 @@ break support generators:
   * an outstretched arm            -> a genuine mid-air island
   * a cape flaring outward         -> a long shallow overhang
   * a raised sword tip             -> a tall isolated pillar that needs bracing
+  * a head off to one side         -> a ball in free air, over the rim of the base
   * bumpy detail on the front only -> supports should end up on the back
 
     python scripts/make_sample.py samples/synthetic_mini.stl
@@ -48,8 +49,15 @@ def build() -> trimesh.Trimesh:
     body.apply_translation([0, 0, 8.0])
     parts.append(_bumpy(body, [0, 1, 0], amplitude=0.5))
 
+    # Head, carried out to the front-left rather than stacked on the shoulders.
+    # Sitting on the axis it had the torso under it and the cape's mouth under
+    # that, so most of its lower hemisphere was in the shadow of something else
+    # and a shaft reaching it only had to clear the model it was already beside.
+    # Out here nothing is beneath it but the base disc, so it is a ball in free
+    # air: contacts wrap the whole underside and the shafts holding them have to
+    # lean out past the rim of the disc to find the plate.
     head = trimesh.creation.icosphere(subdivisions=3, radius=3.6)
-    head.apply_translation([0, 0, 31.0])
+    head.apply_translation([-10.0, 8.0, 31.0])
     parts.append(_bumpy(head, [0, 1, 0], amplitude=0.45, freq=4.0))
 
     # Outstretched arm: nothing beneath its far end, so its tip is an island.
