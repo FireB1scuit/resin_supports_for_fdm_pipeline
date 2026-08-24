@@ -265,6 +265,22 @@ def run_rotate(
     }
 
 
+def overhang_area(mesh, angle_deg: float) -> float:
+    """mm^2 of downward face flagged at ``angle_deg``.
+
+    The one number that says whether the pose is worth keeping: it is the area
+    the scaffold has to reach, and re-posing the model is the only thing that
+    meaningfully shrinks it. Cheap enough to hand back on every placement run —
+    a mask and a dot product over face areas the mesh has already computed.
+    """
+    from .. import overhang as overhang_mod
+
+    if mesh is None or len(getattr(mesh, "faces", ())) == 0:
+        return 0.0
+    mask = overhang_mod.overhang_mask(mesh, angle_deg)
+    return float(np.asarray(mesh.area_faces, dtype=np.float64)[mask].sum())
+
+
 def run_points(session: Session, **patch: Any) -> dict:
     from .. import sampling
 
@@ -275,10 +291,13 @@ def run_points(session: Session, **patch: Any) -> dict:
     t0 = time.perf_counter()
     session.points = sampling.place_points(session.oriented, session.params)
     session.supports = None
+    lo, hi = session.oriented.bounds
     return {
         "elapsed": time.perf_counter() - t0,
         "lift": float(session.params.lift_height),
         "points": [p.as_dict() for p in session.points],
+        "size": [float(v) for v in (hi - lo)],
+        "overhang_area": overhang_area(session.oriented, session.params.overhang_angle_deg),
     }
 
 
@@ -314,9 +333,25 @@ def run_supports(session: Session, points: list[dict] | None = None, **patch: An
         # position would have to survive a float round-trip through JSON.
         "dropped_points": dropped_indices(session.points, build.dropped),
         "faces": int(len(build.mesh.faces)) if build.mesh is not None else 0,
+        # An upper bound, not a measurement. The scaffold is a soup of closed
+        # shells that merely overlap at every junction (see resin._joint_radius),
+        # so the signed volume counts each overlap twice. Good enough to answer
+        # "roughly how much filament is this costing me"; not good enough to
+        # present as a fact, which is why the UI says "under".
+        "volume": support_volume(build.mesh),
         "warnings": session.warnings[:20],
         "params": params_payload(session.params),
     }
+
+
+def support_volume(mesh) -> float:
+    """mm^3 enclosed by the support mesh, over-counting overlaps at joints."""
+    if mesh is None or len(getattr(mesh, "faces", ())) == 0:
+        return 0.0
+    try:
+        return max(0.0, float(mesh.volume))
+    except Exception:  # degenerate soup — a number here is not worth a 500
+        return 0.0
 
 
 def dropped_indices(points: list[SupportPoint], dropped: list[SupportPoint]) -> list[int]:

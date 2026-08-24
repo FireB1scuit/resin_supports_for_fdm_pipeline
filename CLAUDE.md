@@ -53,10 +53,12 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   overhang steeper than the printable limit. If our supports would need supports, the
   generator is broken. `tests/test_supports.py` enforces it exactly on constructed
   scenes.
-  On a real sculpt there is a **measured residual**, guarded by `VIOLATION_BUDGET` in
-  `tests/test_pipeline.py`: a few flat undersides where a support lands on a feature
-  narrower than itself. They are short bridges off anchored material, not floating
-  islands, and `build_supports` reports them in `SupportBuild.warnings`. The budget is a
+  On a real sculpt there used to be a **measured residual**, guarded by
+  `VIOLATION_BUDGET` in `tests/test_pipeline.py`: a few flat undersides where a support
+  landed on a feature narrower than itself. Restricting supports to the plate took it
+  from 0.2% to 0.023%, and moving the sample's head off the body axis took the rest, so
+  the budget is now **zero** — measured over ~247k support faces on the polygon backend
+  and ~240k on the raster one, every preset, flat and lifted. The budget is a
   measurement, not a target — if it rises something regressed, and if it falls, tighten
   it. Do not raise it to make a test pass.
 - **Models arrive pre-posed.** The input STL is assumed to already be rotated the way it
@@ -185,12 +187,14 @@ If a push to `main` is ever attempted, stop and open a PR instead.
     C++ exception into an unwind that `except BaseException` does not catch and the
     interpreter does not survive. Removing `simplify` does not help; nor does
     `shapely.set_precision`. Both were tried.
-  - The raster field is **slower and slightly more conservative**: `mini_0.2` builds go
-    0.65s → 2.32s, and dense drops go 26/347 → 29/347. Violations are 0 under both — the
-    lattice rounds toward *refusing* a position, never toward allowing one, which is what
-    keeps the self-printability invariant intact. Hence two drop budgets in
-    `tests/test_pipeline.py`; they are two measurements of two implementations, not a
-    relaxation of one. Do not merge them.
+  - The raster field is **slower**, and the lattice rounds toward *refusing* a position
+    rather than allowing one, which is what keeps the self-printability invariant intact
+    (violations are 0 under both). It is not reliably the one that drops more, though:
+    on the current sample it goes both ways per preset — 3 against 2 on `mini_0.2`, 8
+    against 10 on `mini_0.2_dense` — because refusing one route sends a shaft down
+    another, and quantisation is not the only thing deciding whether that one lands.
+    Hence two drop budgets in `tests/test_pipeline.py`; they are two measurements of two
+    implementations, not a relaxation of one. Do not merge them.
   - `_SLACK_RATIO` in `avoidance_raster.py` is a **measured** bound (0.516 cells worst
     case, checked against exact `shapely.distance`), not the loose half-diagonal one. At
     the loose value the field refused supports the polygon sweep placed. Re-measure
@@ -200,10 +204,13 @@ If a push to `main` is ever attempted, stop and open a PR instead.
     otherwise only ever exercised where a failure is hardest to see.
 - **`plate_only` is on by default: the build plate is the only landing.** A contact with
   no collision-free route down is left unheld and reported in `SupportBuild.warnings`,
-  rather than propped off the sculpt. That trade is deliberate and measured both ways in
-  `tests/test_pipeline.py`: `DROP_BUDGET` (routing allowed to land on the model, ~1%)
-  against `PLATE_ONLY_DROP_BUDGET` (the shipped default, ~8% on the sample mini — dimples
-  on the upper surface of the head, where every route in crosses the head itself).
+  rather than propped off the sculpt. That trade is deliberate and measured in
+  `tests/test_pipeline.py` as `PLATE_ONLY_DROP_BUDGET` (~2.9% worst preset on the sample
+  mini, and nothing at all in the default floated pose). What is left unheld is the flat
+  underside of the base disc, in the ring where the body capsule hangs below it and
+  blocks the way down. It used to be dimples on the upper surface of the head, back when
+  the sample stacked the head on the body axis; the head now stands off to the side in
+  free air and is reached from below like anything else.
   Turning it off enables only the crude last-resort landing in `resin._drop_shaft`.
   Supports that *start* on the model — a shaft rooted on the sculpt and branching from
   there — are **not implemented**; the UI checkbox says so. Do not quietly implement them

@@ -120,8 +120,8 @@ class SupportParams:
     # under every shaft that reaches the plate, and because a lifted model needs
     # a shaft roughly every `support_spacing`, neighbouring discs overlap into
     # something very close to a raft.
-    foot_diameter: float = 5.0
-    foot_height: float = 2.0
+    foot_diameter: float = 10.0
+    foot_height: float = 0.4
 
     # --- join cone ---
     # The transition piece between the base disc and the shaft — "base -> join
@@ -134,7 +134,7 @@ class SupportParams:
     # off (`foot_height=0`). Clamped no wider than the disc it sits on — a cone
     # wider than what it stands on would flare outward on its way up, which is
     # an overhang.
-    join_cone_diameter: float = 5.0
+    join_cone_diameter: float = 2.5
     join_cone_height: float = 1.0
 
     # --- placement ---

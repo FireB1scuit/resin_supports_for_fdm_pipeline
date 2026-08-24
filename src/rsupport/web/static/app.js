@@ -10,8 +10,18 @@ const state = {
   points: [],          // [{position:[x,y,z], normal:[..], forced, source}]
   dropped: new Set(),  // indices into points that stage 3 could not support
   params: null,        // last params the server reported back
+  presets: null,       // every preset the server knows, by name
+  preset: null,        // params of the preset named in the select, for drift
+  size: null,          // oriented bounding box, mm
+  overhangArea: null,  // mm^2 of flagged downward face
+  volume: null,        // mm^3 enclosed by the scaffold, overlaps counted twice
+  history: [],         // point lists before each hand edit — see undo()
   busy: false,
 };
+
+//: How many hand edits ctrl-Z can walk back. Each entry is a shallow copy of a
+//: point list, so this is bounded memory for an unbounded session.
+const UNDO_DEPTH = 32;
 
 const $ = (id) => document.getElementById(id);
 const loader = new STLLoader();
@@ -23,7 +33,7 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x14161a);
+scene.background = new THREE.Color(0x0f1115);
 
 // Everything downstream is Z-up, because that is how print beds work. Telling
 // three.js the same avoids transposing coordinates on every message.
@@ -35,33 +45,64 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 
-scene.add(new THREE.HemisphereLight(0xdfe6f2, 0x1b1f26, 1.5));
-const key = new THREE.DirectionalLight(0xffffff, 1.9);
+// Turned down from 1.5 + 1.9. The old pair drove the support orange to
+// near-white on every face pointing at the key, which flattened a field of
+// round shafts into one bright mass — the exact thing you are trying to read.
+scene.add(new THREE.HemisphereLight(0xdfe6f2, 0x1b1f26, 1.0));
+const key = new THREE.DirectionalLight(0xffffff, 1.2);
 key.position.set(60, -80, 120);
 scene.add(key);
 const rim = new THREE.DirectionalLight(0x88a8ff, 0.5);
 rim.position.set(-70, 60, 30);
 scene.add(rim);
 
-const grid = new THREE.GridHelper(240, 24, 0x3a4150, 0x252a33);
+const grid = new THREE.GridHelper(240, 24, 0x3a4150, 0x23272f);
 grid.rotation.x = Math.PI / 2;   // GridHelper is XZ by default; we want the XY bed
 scene.add(grid);
+
+// A grid alone gives depth but no floor: with the camera low there is nothing
+// to say where the plate stops. A near-black quad just under the grid lines
+// reads as the bed, and a brighter cross marks the origin the model is dropped
+// onto. Both scale with the grid.
+const plate = new THREE.Mesh(
+  new THREE.PlaneGeometry(240, 240),
+  new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.025,
+                                depthWrite: false }),
+);
+plate.position.z = -0.05;        // under the grid lines, so they stay crisp
+plate.renderOrder = -1;
+scene.add(plate);
+
+const axes = new THREE.LineSegments(
+  new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(
+    [-12, 0, 0, 12, 0, 0, 0, -12, 0, 0, 12, 0], 3)),
+  new THREE.LineBasicMaterial({ color: 0x59616f }),
+);
+scene.add(axes);
 
 const world = new THREE.Group();
 scene.add(world);
 
 const MAT = {
-  model: new THREE.MeshStandardMaterial({ color: 0x9aa3af, roughness: 0.72, metalness: 0.04, flatShading: false }),
-  supports: new THREE.MeshStandardMaterial({ color: 0xff8a3d, roughness: 0.55, metalness: 0.05 }),
+  // Darker than it was (0x9aa3af): the model is the ground the scaffold stands
+  // against, and at the old value it was the brightest thing on screen — it
+  // competed with the panel text and left the supports nowhere to go.
+  model: new THREE.MeshStandardMaterial({ color: 0x7f8794, roughness: 0.72, metalness: 0.04, flatShading: false }),
+  supports: new THREE.MeshStandardMaterial({ color: 0xf2802e, roughness: 0.55, metalness: 0.05 }),
   // Contact points come in two flavours and the difference has to be readable
   // at a glance. Held ones are washed out on purpose — there are hundreds of
   // them and they are covering the model, so they have to stay out of the way
   // of the surface underneath. Unheld ones are solid and a touch bigger: those
   // are the ones worth looking at, and there are usually only a handful.
+  // Cyan, not red. Red used to mean both "a normal contact you can click off"
+  // and "nothing could reach this" — two meanings a shade apart, sitting on
+  // orange supports, which is why the legend needed two lines to separate them.
+  // Cyan is as far from both the grey model and the orange scaffold as this
+  // scene gets, and it leaves red saying only one thing.
   point: new THREE.MeshBasicMaterial({
-    color: 0xff4d4d, transparent: true, opacity: 0.45, depthWrite: false,
+    color: 0x35d6ff, transparent: true, opacity: 0.55, depthWrite: false,
   }),
-  pointDropped: new THREE.MeshBasicMaterial({ color: 0xb00020 }),
+  pointDropped: new THREE.MeshBasicMaterial({ color: 0xff3b30 }),
 };
 
 let modelMesh = null;
@@ -94,11 +135,43 @@ function log(msg, cls = '') {
   el.textContent = msg;
   $('log').appendChild(el);
   $('log').scrollTop = 1e9;
+  // The collapsed strip shows the newest line, so the panel can stay shut and
+  // still be current. Expanded, the strip and the list say the same thing,
+  // which is fine — it is one line of duplication for a section that is
+  // usually closed.
+  const tail = $('logtail');
+  tail.textContent = msg;
+  tail.className = cls;
+  // While something is running, the badge over the canvas says which stage it
+  // is in rather than a generic "working" — the stage names are already being
+  // written here, and "placing support points" is a more useful thing to be
+  // told than that the app is busy.
+  if (state.busy) setWorking(msg);
 }
 
-function busy(on) {
+/** The canvas-corner badge's label. The trailing ellipsis the log uses to mean
+ *  "in progress" is redundant next to a spinner. */
+function setWorking(msg) {
+  $('worktext').textContent = (msg || 'working').replace(/\s*…\s*$/, '');
+}
+
+/** Two flavours of wait, because they interrupt differently.
+ *
+ *  `heavy` washes the canvas out, and is for the times there is nothing on it
+ *  worth looking at: the first load, and the Pyodide warm-up. Everything else
+ *  — a slider released, a point deleted — is a second or two during which
+ *  watching the scaffold change is the entire point, so it gets a bar under
+ *  the panel header and leaves the viewport alone. Dimming the stage on every
+ *  slider release read as a flicker and hid the answer. */
+function busy(on, heavy = false) {
   state.busy = on;
-  $('busy').classList.toggle('on', on);
+  $('prog').classList.toggle('on', on);
+  // The badge rides on the canvas, so it is redundant behind the full overlay —
+  // that already has a spinner of its own in the middle of the view.
+  $('work').classList.toggle('on', on && !heavy);
+  $('busy').classList.toggle('on', on && heavy);
+  if (on) setWorking($('logtail').textContent);
+  else $('busy').classList.remove('on');
 }
 
 // ---------------------------------------------------------------- api
@@ -144,6 +217,8 @@ function frameModel() {
 
   const g = Math.max(60, Math.ceil(r / 20) * 20 * 2);
   grid.scale.setScalar(g / 240);
+  plate.scale.setScalar(g / 240);
+  axes.scale.setScalar(Math.max(1, g / 240));
 }
 
 function rebuildMarkers() {
@@ -153,9 +228,11 @@ function rebuildMarkers() {
 
   // Split by whether stage 3 managed to support the point. Two meshes rather
   // than one with per-instance colours: opacity is a property of the material,
-  // and a deep red at 45% over a dark background reads as washed out, not as
-  // urgent. Each mesh remembers which state.points index every instance came
-  // from, so clicking one still deletes the right point.
+  // and the two flavours differ in it — held contacts are washed out because
+  // there are hundreds of them over the surface you are trying to see, unheld
+  // ones are solid because there are usually a handful and they are the news.
+  // Each mesh remembers which state.points index every instance came from, so
+  // clicking one still deletes the right point.
   const held = [], unheld = [];
   state.points.forEach((_, i) => (state.dropped.has(i) ? unheld : held).push(i));
 
@@ -244,6 +321,7 @@ function syncSliders(p) {
   if (p.strut_lean_deg != null) $('lean').value = p.strut_lean_deg;
   if (p.parenting != null) $('parenting').value = p.parenting;
   showSliderValues();
+  markDrift();
 }
 
 //
@@ -330,7 +408,7 @@ VALUE_IDS.concat(ROTATION_IDS).forEach(bindValueBox);
 // ---------------------------------------------------------------- pipeline
 
 async function upload(file) {
-  busy(true);
+  busy(true, true);
   try {
     $('log').innerHTML = '';
     log(`reading ${file.name} …`);
@@ -396,14 +474,24 @@ $('asloaded').onclick = () => {
   rerotate();
 };
 
-async function runPoints() {
-  log('placing support points …');
-  const r = await postJSON(`/api/points/${state.sid}`, { overrides: overrides() });
+/** Take a stage-2 result, whoever asked for it. */
+function absorbPoints(r) {
   state.points = r.points;
   state.dropped = new Set();
+  // A fresh placement is not something ctrl-Z can walk back into: the edits in
+  // the stack belong to a point list that no longer exists.
+  state.history = [];
+  state.size = r.size || null;
+  state.overhangArea = r.overhang_area ?? null;
+  $('resetpoints').disabled = true;
   rebuildMarkers();
   const forced = state.points.filter(p => p.forced).length;
   log(`${state.points.length} points (${forced} mandatory) in ${r.elapsed.toFixed(2)}s`, 'g');
+}
+
+async function runPoints() {
+  log('placing support points …');
+  absorbPoints(await postJSON(`/api/points/${state.sid}`, { overrides: overrides() }));
 }
 
 async function runSupports() {
@@ -420,17 +508,45 @@ async function runSupports() {
   });
   rebuildMarkers();
 
-  $('stats').innerHTML =
-    `<b>${r.points}</b> supports &middot; <b>${r.braces}</b> links<br>` +
-    `<b>${r.faces.toLocaleString()}</b> triangles` +
-    (r.dropped
-      ? `<br><span style="color:var(--err)"><b>${r.dropped}</b> unsupported ` +
-        `&mdash; shown in solid red</span>`
-      : '');
+  state.volume = r.volume ?? null;
+  showStats(r);
   (r.warnings || []).slice(0, 5).forEach(w => log(w, 'w'));
   log(`built in ${r.elapsed.toFixed(2)}s`, 'g');
 
   ['dl3mf', 'dlstl', 'dlsep'].forEach(id => $(id).disabled = false);
+}
+
+//: g/cm^3. PLA, because that is what an FDM scaffold gets printed in more often
+//: than not, and a number an order of magnitude out is worse than no number.
+const DENSITY = 1.24;
+
+/** What the run cost, in the terms somebody deciding whether to re-pose the
+ *  model actually thinks in.
+ *
+ *  Overhang area is the one that earns its place: it is the area the scaffold
+ *  has to reach, it is unaffected by any dial in the panel, and turning the
+ *  model is the only thing that meaningfully shrinks it. The mass is deliberately
+ *  hedged — the scaffold is exported as overlapping closed shells, so its signed
+ *  volume counts every junction twice and the true figure is somewhat under. */
+function showStats(r) {
+  const bits = [`<b>${r.points}</b> supports &middot; <b>${r.braces}</b> links`,
+                `<b>${r.faces.toLocaleString()}</b> triangles`];
+
+  if (state.size) {
+    bits.push(`<b>${state.size.map(v => v.toFixed(1)).join(' × ')}</b> mm`);
+  }
+  if (state.overhangArea != null) {
+    bits.push(`<b>${(state.overhangArea / 100).toFixed(1)}</b> cm&sup2; overhang`);
+  }
+  if (state.volume) {
+    const grams = (state.volume / 1000) * DENSITY;
+    bits.push(`under <b>${grams.toFixed(1)}</b> g of support`);
+  }
+  if (r.dropped) {
+    bits.push(`<span style="color:var(--err)"><b>${r.dropped}</b> unsupported ` +
+              `&mdash; shown in solid red</span>`);
+  }
+  $('stats').innerHTML = bits.join('<br>');
 }
 
 /** The lift moves the model itself, so the viewer's copy of it is stale too.
@@ -560,6 +676,38 @@ addEventListener('resize', hideHelp);
 
 // ------------------------------------------------------------- interaction
 
+//
+// Deleting a contact is one click and adding one is shift-click, so a misplaced
+// click used to cost a support with no way back short of nudging spacing to
+// force a whole fresh placement. Every hand edit now files the list it started
+// from, and ctrl-Z walks back through them.
+//
+function pushHistory() {
+  state.history.push(state.points.slice());
+  if (state.history.length > UNDO_DEPTH) state.history.shift();
+  $('resetpoints').disabled = false;
+}
+
+async function undo() {
+  if (!state.sid || state.busy || !state.history.length) return;
+  state.points = state.history.pop();
+  state.dropped = new Set();
+  rebuildMarkers();
+  log(`undone — ${state.points.length} points`);
+  await rerun('geometry');
+}
+
+addEventListener('keydown', (e) => {
+  // Not while a number box has the caret: there ctrl-Z is the browser's, and
+  // undoing a keystroke is what the user means.
+  if (document.activeElement?.tagName === 'INPUT'
+      && document.activeElement.type === 'number') return;
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+    e.preventDefault();
+    undo();
+  }
+});
+
 const raycaster = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
 let downAt = null;
@@ -580,6 +728,7 @@ renderer.domElement.addEventListener('pointerup', async (e) => {
     const hit = raycaster.intersectObject(modelMesh, false)[0];
     if (!hit) return;
     const n = hit.face.normal.clone().transformDirection(modelMesh.matrixWorld);
+    pushHistory();
     state.points.push({
       position: hit.point.toArray(),
       normal: n.toArray(),
@@ -598,6 +747,7 @@ renderer.domElement.addEventListener('pointerup', async (e) => {
     if (hit && hit.instanceId != null) {
       // Instances are grouped by flavour, so the instance index is not the
       // point index — the mesh carries the mapping back.
+      pushHistory();
       state.points.splice(hit.object.userData.at[hit.instanceId], 1);
       log('deleted a support');
       state.dropped = new Set();
@@ -628,17 +778,84 @@ $('braces').addEventListener('change', () => rerun('geometry'));
 // The lift moves the model, so the point list has to be placed again on top of
 // rebuilding the scaffold — see relift().
 $('lift').addEventListener('change', relift);
-$('preset').addEventListener('change', async () => {
-  if (!state.sid || state.busy) return;
+//
+// Which dials belong to which fold, so a section can say that its own contents
+// have wandered from the preset. The mapping is here rather than in the markup
+// because the override names are here too — one list to keep in step, not two.
+//
+const FOLD_KEYS = {
+  model:      ['lift_height'],
+  structure:  ['parenting', 'strut_lean_deg'],
+  supports:   ['tip_diameter', 'shaft_lower_diameter', 'support_spacing',
+               'overhang_angle_deg', 'tip_style', 'plate_only'],
+  crosslinks: ['brace_enabled', 'brace_diameter', 'brace_max_span', 'brace_angle_deg',
+               'brace_headroom', 'brace_interval', 'brace_start_height'],
+  base:       ['foot_diameter', 'foot_height'],
+  joincone:   ['join_cone_diameter', 'join_cone_height'],
+};
+
+/** Has this dial been moved off the preset? Slider values are floats that have
+ *  been through JSON and a toFixed, so an exact test would report drift that
+ *  is not there. */
+function differs(a, b) {
+  if (typeof a === 'number' && typeof b === 'number') return Math.abs(a - b) > 1e-6;
+  return a !== b;
+}
+
+/** Put a dot on every section that no longer matches the preset the select is
+ *  still naming, and offer the way back. Without this the panel simply lies
+ *  after the first nudge: it goes on saying "ender3" whatever you do to it. */
+function markDrift() {
+  if (!state.preset) return;
+  const now = overrides();
+  let any = false;
+  for (const [fold, keys] of Object.entries(FOLD_KEYS)) {
+    const off = keys.some(k => state.preset[k] !== undefined && differs(now[k], state.preset[k]));
+    any = any || off;
+    const el = document.querySelector(`details.fold[data-fold="${fold}"] .drift`);
+    if (el) el.classList.toggle('on', off);
+  }
+  $('revert').disabled = !any;
+}
+
+/** Adopt a preset wholesale: dials first, then the pipeline.
+ *
+ *  The dials matter. Stage 2 is told the preset by name, but stage 3 is told
+ *  the panel's own values — so leaving the sliders where they were meant a new
+ *  preset placed its points and then had its geometry built out of the old
+ *  preset's numbers. */
+async function applyPreset(name) {
+  const p = state.presets?.[name];
+  if (p) {
+    state.preset = p;
+    syncSliders(p);
+  }
+  if (!state.sid || state.busy) { markDrift(); return; }
   busy(true);
   try {
-    const r = await postJSON(`/api/points/${state.sid}`, { preset: $('preset').value });
-    state.points = r.points;
-    state.dropped = new Set();
+    absorbPoints(await postJSON(`/api/points/${state.sid}`, { preset: name }));
     await runSupports();
   } catch (err) { log(`error: ${err.message}`, 'e'); }
   finally { busy(false); }
-});
+}
+
+$('preset').addEventListener('change', () => applyPreset($('preset').value));
+$('revert').onclick = () => applyPreset($('preset').value);
+
+// Anything moved anywhere in the panel can put a section out of step with the
+// preset, so the check rides on the panel rather than on twenty-odd controls.
+$('panel').addEventListener('change', markDrift);
+
+$('resetpoints').onclick = async () => {
+  if (!state.sid || state.busy) return;
+  busy(true);
+  try {
+    log('placing support points again …');
+    await runPoints();
+    await runSupports();
+  } catch (err) { log(`error: ${err.message}`, 'e'); }
+  finally { busy(false); }
+};
 
 for (const [id, mode] of [['dl3mf', '3mf'], ['dlstl', 'combined'], ['dlsep', 'separate']]) {
   $(id).onclick = async () => {
@@ -676,6 +893,54 @@ drop.addEventListener('click', () => {
   input.click();
 });
 
+// A first visit has nothing on the canvas and no way to get anything there
+// without going and finding an STL, which is a poor advertisement for a tool
+// whose whole output is visual. The sample ships with the page — it is a static
+// asset, so it works the same served from Python or from a bundle on Pages.
+const SAMPLE = 'synthetic_mini.stl';
+$('sample').addEventListener('click', async (e) => {
+  e.stopPropagation();          // not also the picker behind it
+  try {
+    const res = await fetch(new URL(`./samples/${SAMPLE}`, import.meta.url));
+    if (!res.ok) throw new Error(`${res.status}`);
+    await upload(new File([await res.blob()], SAMPLE, { type: 'model/stl' }));
+  } catch (err) {
+    log(`could not load the sample: ${err.message}`, 'e');
+  }
+});
+
+//
+// Stacked on a narrow window there is no canvas corner for the legend to sit
+// in, so it moves into the panel instead of disappearing. It used to be hidden
+// outright below 680px, which took the only explanation of click-to-delete and
+// shift-click-to-add away from the layout where those gestures are hardest to
+// discover.
+//
+const legendHome = $('legend').parentNode;
+const legendSlot = document.createElement('section');
+legendSlot.innerHTML = '<h2>viewport</h2>';
+const stacked = matchMedia('(max-width: 680px)');
+
+function placeLegend() {
+  const legend = $('legend');
+  if (stacked.matches) {
+    if (!legendSlot.parentNode) $('scroll').appendChild(legendSlot);
+    legendSlot.appendChild(legend);
+    legend.classList.add('inpanel');
+  } else {
+    legendHome.appendChild(legend);
+    legend.classList.remove('inpanel');
+    legendSlot.remove();
+  }
+}
+// Both, on purpose. The media query is the one that expresses the intent, but
+// it does not fire under every way a viewport can change size, and a legend
+// stranded in the wrong parent is a layout bug rather than a missed nicety.
+// placeLegend is idempotent, so the duplicate call costs nothing.
+stacked.addEventListener('change', placeLegend);
+addEventListener('resize', placeLegend);
+placeLegend();
+
 // ---------------------------------------------------------------- startup
 
 (async function init() {
@@ -685,7 +950,7 @@ drop.addEventListener('click', () => {
       // seconds of downloading on a cold cache. Say what it is doing rather
       // than showing an inert page: the first impression of the hosted build
       // is this wait, and an unexplained one reads as broken.
-      busy(true);
+      busy(true, true);
       log('starting the pipeline in your browser — nothing is uploaded anywhere', 'w');
       const stop = onProgress(({ phase, detail }) => {
         if (phase === 'fatal') log(`could not start: ${detail}`, 'e');
@@ -705,6 +970,8 @@ drop.addEventListener('click', () => {
       sel.appendChild(o);
     }
     sel.value = def;
+    state.presets = presets;
+    state.preset = presets[def];
     syncSliders(presets[def]);
     state.params = presets[def];
   } catch (err) {

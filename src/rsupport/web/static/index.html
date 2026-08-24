@@ -5,21 +5,51 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>resin supports for FDM</title>
 <style>
+  /* Two rules decide every colour here.
+
+     One: a hue in the viewport means exactly one thing. Grey is the model,
+     orange is a support, cyan is a contact you can grab, red is a failure. The
+     panel used to spend orange on buttons and sliders as well, so the eye
+     bounced between the Download button and the scaffold; and red used to mean
+     both "normal contact point" and "could not be supported", which is why the
+     legend needed two shades of it to explain itself.
+
+     Two: the chrome is therefore neutral. The only saturated colour left in
+     the panel is the focus ring, so anything coloured on screen is carrying
+     information. */
   :root {
-    --bg: #14161a;
-    --panel: #1c1f25;
-    --panel-2: #23272f;
-    --line: #2f343d;
-    --text: #e6e8ec;
-    --dim: #949aa6;
-    --accent: #ff8a3d;
-    --accent-2: #4fb0ff;
-    --ok: #59d18e;
-    --warn: #ffcc55;
-    --err: #ff6b6b;
+    --bg: #0f1115;
+    --panel: #16181d;
+    --panel-2: #1f232a;
+    --line: #2b303a;
+    --line-2: #3a4150;      /* hover borders, major grid */
+    --text: #e7eaee;
+    --dim: #8e96a2;
+    --control: #c9d1dc;     /* slider fill, checkbox tick */
+    --focus: #7fb2e6;
+    --ok: #5fd39a;
+    --warn: #e3b341;
+    --err: #f0655f;
+
+    /* Mirrored from MAT in app.js. Kept here as well so the legend and the
+       geometry cannot drift apart without somebody noticing. */
+    --c-model: #7f8794;
+    --c-support: #f2802e;
+    --c-point: #35d6ff;
+    --c-dropped: #ff3b30;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
+
+  /* Until this rule there was no keyboard focus indicator anywhere in the app:
+     the only focus style was on a number box, and the box's own outline was
+     switched off. Buttons, chips, the preset select, every slider and every
+     checkbox showed nothing at all, so tabbing through the panel was blind.
+     One rule covers the lot, including the fold headings. */
+  :focus-visible {
+    outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px;
+  }
+  input[type=checkbox] { accent-color: var(--control); }
   body {
     background: var(--bg); color: var(--text);
     font: 13px/1.45 ui-sans-serif, system-ui, "Segoe UI", sans-serif;
@@ -35,14 +65,20 @@
     transition: background .15s;
   }
   #drop.hide { display: none; }
-  #drop.over { background: rgba(255,138,61,.12); }
+  #drop.over { background: rgba(127,178,230,.10); }
+  #drop { cursor: pointer; }
   #drop .inner {
     border: 1.5px dashed var(--line); border-radius: 14px;
     padding: 42px 56px; pointer-events: none;
   }
+  #drop:hover .inner { border-color: var(--line-2); }
+  /* The whole overlay is the click target, so the block on top of it lets
+     clicks through — the one control inside has to opt back in. */
+  #drop .samples { pointer-events: auto; }
+  #drop .samples button { pointer-events: auto; }
   #drop h1 { margin: 0 0 6px; font-size: 19px; font-weight: 600; letter-spacing: -.01em; }
   #drop p { margin: 0; color: var(--dim); }
-  #drop b { color: var(--accent); }
+  #drop b { color: var(--c-support); }
 
   #hud {
     position: absolute; left: 12px; top: 12px; z-index: 4;
@@ -55,6 +91,13 @@
     border: 1px solid var(--line);
   }
   #legend .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; }
+  /* Stacked, there is no canvas corner to sit in — the legend moves into the
+     panel rather than vanishing. It used to be display:none below 680px, which
+     took away the only explanation of click-to-delete and shift-click-to-add on
+     exactly the layout where those gestures are hardest to guess. */
+  #legend.inpanel {
+    position: static; background: none; border: 0; padding: 0; font-size: 11px;
+  }
 
   aside {
     background: var(--panel); border-left: 1px solid var(--line);
@@ -92,6 +135,16 @@
   details.fold[open] > summary { color: var(--text); }
   details.fold[open] > summary::before { transform: rotate(45deg); margin-top: -3px; }
   details.fold > summary:hover { color: var(--text); }
+
+  /* A section whose dials no longer match the preset says so, because the
+     preset select goes on naming the preset either way. The dot is the whole
+     signal — the number that changed is one click below it. */
+  .drift {
+    flex: none; width: 5px; height: 5px; border-radius: 50%;
+    background: var(--control); opacity: 0; transition: opacity .12s;
+  }
+  .drift.on { opacity: 1; }
+  summary .sp { flex: 1; }
   details.fold:last-of-type { border-bottom: 1px solid var(--line); }
   details.fold > .row:last-child { margin-bottom: 11px; }
   .row[data-help] label { cursor: help; }
@@ -127,7 +180,7 @@
 
   .row { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
   .row label { flex: 1; min-width: 0; color: var(--dim); }
-  input[type=range] { flex: 0 1 96px; min-width: 52px; accent-color: var(--accent); }
+  input[type=range] { flex: 0 1 96px; min-width: 52px; accent-color: var(--control); }
 
   /* The number beside a slider is the same value, typed instead of dragged.
      It reads as a readout until you click into it. */
@@ -136,7 +189,10 @@
     background: var(--panel-2); border: 1px solid var(--line);
     border-radius: 6px; padding: 2px 5px;
   }
-  .num:focus-within { border-color: var(--accent); }
+  /* The ring belongs to the box, not to the bare input inside it — the border
+     is what reads as the control. */
+  .num:focus-within { border-color: var(--focus); box-shadow: 0 0 0 2px rgba(127,178,230,.22); }
+  .num input:focus-visible { outline: none; }
   .num input {
     width: 38px; padding: 0; border: 0; background: none; color: var(--text);
     font: inherit; font-variant-numeric: tabular-nums; text-align: right;
@@ -152,26 +208,55 @@
     padding: 6px 9px; font: inherit; cursor: pointer;
   }
   select { width: 100%; }
-  button:hover:not(:disabled) { border-color: var(--dim); }
+  button:hover:not(:disabled) { border-color: var(--line-2); }
   button:disabled { opacity: .4; cursor: default; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #1a1206; font-weight: 600; }
+  button.primary { background: var(--text); border-color: var(--text); color: #14161a; font-weight: 600; }
   button.primary:hover:not(:disabled) { filter: brightness(1.08); }
   .btns { display: flex; gap: 6px; flex-wrap: wrap; }
   .btns button { flex: 1; }
+
+  button.tiny {
+    padding: 3px 7px; font-size: 11px; color: var(--dim); border-radius: 6px;
+  }
+  button.tiny:hover:not(:disabled) { color: var(--text); }
 
   .chip {
     background: var(--panel-2); border: 1px solid var(--line);
     border-radius: 7px; padding: 5px 9px; font-size: 11.5px; cursor: pointer;
     color: var(--dim);
   }
-  .chip.on { color: var(--text); border-color: var(--accent); }
+  .chip.on { color: var(--text); border-color: var(--line-2); background: #2a303a; }
 
   #stats { color: var(--dim); font-size: 11.5px; line-height: 1.7; }
   #stats b { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 500; }
 
+  /* The log used to hold 132px of the panel open at all times, in dim
+     monospace, to tell you "built in 0.4s". With seven fold sections above it
+     the panel's scarce resource is height, so it collapses to the one line that
+     is actually news — click it for the rest. */
+  #logbox { border-top: 1px solid var(--line); flex: none; }
+  #logbox > summary {
+    display: flex; align-items: center; gap: 8px; padding: 8px 14px;
+    cursor: pointer; user-select: none; list-style: none;
+    font-size: 11px; color: var(--dim);
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  #logbox > summary::-webkit-details-marker { display: none; }
+  #logbox > summary::before {
+    content: ""; flex: none; width: 5px; height: 5px;
+    border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+    transform: rotate(-45deg); transition: transform .12s;
+  }
+  #logbox[open] > summary::before { transform: rotate(45deg); margin-top: -3px; }
+  #logbox > summary:hover { color: var(--text); }
+  #logtail { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #logtail.e { color: var(--err); }
+  #logtail.w { color: var(--warn); }
+  #logtail.g { color: var(--ok); }
+
   #log {
-    border-top: 1px solid var(--line); padding: 9px 14px;
-    font-size: 11px; color: var(--dim); max-height: 132px; overflow-y: auto;
+    padding: 0 14px 9px; font-size: 11px; color: var(--dim);
+    max-height: 168px; overflow-y: auto;
     font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
   }
   #log div { white-space: pre-wrap; }
@@ -179,9 +264,29 @@
   #log .w { color: var(--warn); }
   #log .g { color: var(--ok); }
 
+  /* A rebuild is a second or two and the whole point is to watch the scaffold
+     change, so washing the canvas out for it read as a flicker and hid the one
+     thing worth seeing. The overlay is now kept for the waits where there is
+     genuinely nothing to look at — the first load, and the Pyodide warm-up —
+     and everything else gets a bar under the panel header. */
   .busy { position: absolute; inset: 0; z-index: 6; display: none; place-items: center;
-          background: rgba(20,22,26,.55); }
+          background: rgba(15,17,21,.55); }
   .busy.on { display: grid; }
+
+  #prog {
+    flex: none;   /* 2px in a flex column will otherwise shrink to nothing */
+    height: 2px; background: var(--line); overflow: hidden;
+    opacity: 0; transition: opacity .12s;
+  }
+  #prog.on { opacity: 1; }
+  #prog::after {
+    content: ""; display: block; width: 40%; height: 100%; background: var(--control);
+    animation: slide 1.05s ease-in-out infinite;
+  }
+  @keyframes slide {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(250%); }
+  }
 
   /* A fixed 296px panel eats a narrow window alive — at 430px the viewport is
      left with 130px of canvas. Shrink, then stack. */
@@ -196,7 +301,6 @@
   @media (max-width: 680px) {
     body { grid-template-columns: 1fr; grid-template-rows: minmax(240px, 50vh) 1fr; }
     aside { border-left: none; border-top: 1px solid var(--line); }
-    #legend { display: none; }
     /* Stacked, the panel is the full window again — take the room back. */
     input[type=range] { flex: 0 1 96px; }
     .num { padding: 2px 5px; }
@@ -204,16 +308,40 @@
   }
   .spinner {
     width: 26px; height: 26px; border-radius: 50%;
-    border: 2.5px solid var(--line); border-top-color: var(--accent);
+    border: 2.5px solid var(--line); border-top-color: var(--text);
     animation: spin .7s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* The bar under the panel header answers "is it working?" for somebody
+     already looking at the panel. Anyone watching the model is looking at the
+     other side of the window, so the same answer is repeated in the corner of
+     the canvas — opposite the layer chips, out of the way of the model. */
+  #work {
+    position: absolute; right: 12px; top: 12px; z-index: 4;
+    display: flex; align-items: center; gap: 7px;
+    background: rgba(15,17,21,.72); border: 1px solid var(--line);
+    border-radius: 7px; padding: 5px 9px; font-size: 11.5px; color: var(--dim);
+    opacity: 0; transition: opacity .12s; pointer-events: none;
+  }
+  #work.on { opacity: 1; }
+  #work .spinner {
+    width: 12px; height: 12px; border-width: 1.5px;
+  }
+  #worktext { white-space: nowrap; }
+  /* Narrow enough and the label would crowd the model — the spinner alone
+     still says the thing. */
+  @media (max-width: 560px) {
+    #worktext { display: none; }
+  }
 </style>
 </head>
 <body>
 
 <div id="stage">
   <canvas id="canvas"></canvas>
+
+  <div id="work"><div class="spinner"></div><span id="worktext">working</span></div>
 
   <div id="hud">
     <button class="chip on" data-toggle="model">model</button>
@@ -223,11 +351,11 @@
   </div>
 
   <div id="legend">
-    <div><span class="sw" style="background:#9aa3af"></span>model</div>
-    <div><span class="sw" style="background:#ff8a3d"></span>supports</div>
-    <div><span class="sw" style="background:#ff4d4d; opacity:.45"></span>contact point &mdash; click to delete</div>
-    <div><span class="sw" style="background:#b00020"></span>unsupported &mdash; nothing could reach it</div>
-    <div style="margin-top:4px">shift-click the model to add one</div>
+    <div><span class="sw" style="background:var(--c-model)"></span>model</div>
+    <div><span class="sw" style="background:var(--c-support)"></span>supports</div>
+    <div><span class="sw" style="background:var(--c-point); opacity:.55"></span>contact point &mdash; click to delete</div>
+    <div><span class="sw" style="background:var(--c-dropped)"></span>unsupported &mdash; nothing could reach it</div>
+    <div style="margin-top:4px">shift-click the model to add one &middot; ctrl-Z undoes</div>
   </div>
 
   <div class="busy" id="busy"><div class="spinner"></div></div>
@@ -235,7 +363,11 @@
   <div id="drop">
     <div class="inner">
       <h1>Drop an STL here</h1>
-      <p>it gets oriented and given <b>resin-style supports</b> sized for FDM</p>
+      <p>&mdash; or click anywhere to browse &mdash;</p>
+      <p style="margin-top:10px">it gets oriented and given <b>resin-style supports</b> sized for FDM</p>
+      <p class="samples" style="margin-top:14px">
+        nothing to hand? <button id="sample" class="tiny">load a test model</button>
+      </p>
     </div>
   </div>
 </div>
@@ -245,18 +377,20 @@
     <div class="title">resin supports for FDM</div>
     <div class="sub" id="filename">no model loaded</div>
   </header>
+  <div id="prog"></div>
 
   <div class="scroll" id="scroll">
     <section>
       <h2>printer</h2>
       <div class="row">
         <label for="preset">preset</label>
+        <button id="revert" class="tiny" disabled>revert changes</button>
       </div>
       <select id="preset"></select>
     </section>
 
     <details class="fold" data-fold="model">
-      <summary>model</summary>
+      <summary>model<span class="sp"></span><span class="drift"></span></summary>
       <div class="row" data-help="The model floats this far above the plate and hangs off the
            scaffold, the way a resin print does. Its underside then gets supported like any
            other overhang &mdash; no elephant&rsquo;s foot, no squashed first layer. 0 sets it
@@ -268,7 +402,7 @@
     </details>
 
     <details class="fold" data-fold="structure">
-      <summary>structure</summary>
+      <summary>structure<span class="sp"></span><span class="drift"></span></summary>
       <div class="row" data-help="How hard the arms gather tips onto a shared shaft. 0 gives every
            contact a shaft of its own; 1 reaches as far as the lean allows, so far fewer shafts
            stand on the plate.">
@@ -287,7 +421,7 @@
     </details>
 
     <details class="fold" data-fold="supports">
-      <summary>supports</summary>
+      <summary>supports<span class="sp"></span><span class="drift"></span></summary>
       <div class="row" data-help="How wide the support is where it touches the model. Thinner
            leaves less of a scar and snaps off more easily; too thin and the nozzle cannot lay it
            down at all.">
@@ -334,7 +468,7 @@
     </details>
 
     <details class="fold" data-fold="crosslinks">
-      <summary>cross-links</summary>
+      <summary>cross-links<span class="sp"></span><span class="drift"></span></summary>
       <div class="row" data-help="Diagonal ties between shafts that are actually next to each
            other, laid on heights the whole field shares. They are what keeps a scaffold of thin
            shafts from wandering as it grows.">
@@ -383,7 +517,7 @@
     </details>
 
     <details class="fold" data-fold="base">
-      <summary>base</summary>
+      <summary>base<span class="sp"></span><span class="drift"></span></summary>
       <div class="row" data-help="A disc under every shaft that reaches the plate. Wide enough and
            neighbouring discs overlap into a single raft, which is what makes a scaffold of thin
            shafts stay stuck down.">
@@ -400,7 +534,7 @@
     </details>
 
     <details class="fold" data-fold="joincone">
-      <summary>join cone</summary>
+      <summary>join cone<span class="sp"></span><span class="drift"></span></summary>
       <div class="row" data-help="The piece between the base and the shaft. Sized on its own
            &mdash; it does not grow or shrink with the base above, and it is still there with the
            base turned off. Never wider than the disc it stands on, since a cone that flared
@@ -446,6 +580,9 @@
     <section>
       <h2>result</h2>
       <div id="stats">&mdash;</div>
+      <div class="btns" style="margin-top:8px">
+        <button id="resetpoints" disabled>reset contact points</button>
+      </div>
     </section>
 
     <section>
@@ -462,7 +599,10 @@
     </section>
   </div>
 
-  <div id="log"></div>
+  <details id="logbox">
+    <summary><span id="logtail">ready</span></summary>
+    <div id="log"></div>
+  </details>
 </aside>
 
 <script type="importmap">

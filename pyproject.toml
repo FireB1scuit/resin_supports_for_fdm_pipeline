@@ -33,7 +33,7 @@ rsupport = "rsupport.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-rsupport = ["web/static/*"]
+rsupport = ["web/static/*", "web/static/samples/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
