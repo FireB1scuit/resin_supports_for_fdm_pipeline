@@ -349,19 +349,57 @@ def test_empty_point_list():
 
 
 def test_ledge_support_lands_on_the_plate():
+    # The disc is pinned rather than taken from the preset because this scene
+    # has a stem 3.5 mm away, and the shipped default is wider than the gap —
+    # which is `_foot_radius` doing its job, tested on its own below. What is
+    # being tested here is that a plate landing gets the full disc when there
+    # is room for it, so the scene has to have room for it.
+    params = PARAMS.with_(foot_diameter=5.0)
     model = table(bar_z=10.0)
-    build = build_supports(model, [down_point(5.0, 0.0, 10.0)], PARAMS)
+    build = build_supports(model, [down_point(5.0, 0.0, 10.0)], params)
 
     assert build.n_points == 1
     assert not build.dropped
     lo, hi = build.mesh.bounds
     assert lo[2] == pytest.approx(0.0, abs=1e-9), "the shaft must reach the build plate"
-    assert hi[2] == pytest.approx(10.0 + PARAMS.tip_penetration, abs=1e-9)
+    assert hi[2] == pytest.approx(10.0 + params.tip_penetration, abs=1e-9)
 
     # A plate landing gets the wide adhesion foot.
     near_plate = build.mesh.vertices[build.mesh.vertices[:, 2] < 1e-9]
     width = 2 * np.linalg.norm(near_plate[:, :2] - np.array([5.0, 0.0]), axis=1).max()
-    assert width == pytest.approx(PARAMS.foot_diameter, rel=1e-6)
+    assert width == pytest.approx(params.foot_diameter, rel=1e-6)
+
+
+def test_a_disc_too_wide_for_the_gap_shrinks_rather_than_fusing_into_the_wall():
+    """The one place the disc's width is not its own business.
+
+    A base is several times fatter than the shaft under it, and a shaft that
+    routed around something comes down hard against that thing's clearance
+    boundary — so a full-width disc there reaches straight back into the
+    sculpt and welds the support to the model at the one place a blade cannot
+    get in. `_foot_radius` gives up width instead, and only as much as it must.
+
+    This scene is the case: the stem edge is 3.5 mm from the landing and the
+    shipped disc is 10 mm across, so it cannot have what it wants.
+    """
+    model = table(bar_z=10.0)
+    build = build_supports(model, [down_point(5.0, 0.0, 10.0)], PARAMS)
+
+    near_plate = build.mesh.vertices[build.mesh.vertices[:, 2] < 1e-9]
+    width = 2 * np.linalg.norm(near_plate[:, :2] - np.array([5.0, 0.0]), axis=1).max()
+
+    room = 2 * (3.5 - PARAMS.xy_clearance)
+    assert PARAMS.foot_diameter > room, "scene must be the tight case"
+    assert width <= room + 1e-6, "never wider than the gap it has to fit"
+    # It gives up its width, not the foot — and gives up only what it must. The
+    # polygon sweep lands on the gap exactly (6.200); the raster one quantises
+    # and comes in a shade under (6.018), because a lattice cell rounds toward
+    # refusing a position. The floor here is that backend tolerance, not slack.
+    assert width >= room * 0.95
+    assert width > PARAMS.shaft_lower_diameter, "a shrunk disc is still a disc"
+    # And that is what the width bought — the stem is left its clearance.
+    assert near_plate[:, 0].min() - 1.5 >= PARAMS.xy_clearance - 1e-6
+    assert_printable(build.mesh, PARAMS, model, joints=build.joints)
 
 
 def test_the_base_can_be_turned_off_entirely():
@@ -391,7 +429,9 @@ def test_the_join_cone_survives_the_disc_being_turned_off():
 def test_a_support_shorter_than_its_own_base_still_gets_one():
     """The base may not grow out of the top of the shaft it sits under, but a
     stub of a support is the one that most needs holding onto the plate."""
-    params = PARAMS.with_(foot_height=6.0)
+    # foot_diameter pinned for the same reason as above: this scene's stem is
+    # closer than the shipped disc is wide, and the shrink is tested on its own.
+    params = PARAMS.with_(foot_height=6.0, foot_diameter=5.0)
     model = table(bar_z=3.0)
     build = build_supports(model, [down_point(5.0, 0.0, 3.0)], params)
 

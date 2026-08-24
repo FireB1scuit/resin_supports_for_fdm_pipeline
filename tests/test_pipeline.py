@@ -57,10 +57,12 @@ VIOLATION_BUDGET = 0.0  # fraction of support faces
 # the body capsule hangs below it and blocks the way down. Leaving those unheld
 # is the choice `plate_only` exists to make.
 #
-# Worst case measured across every preset is 4.48% on mini_0.2_sparse; the
-# default pose, which floats the model, drops nothing at all. Measurements, not
-# aspirations.
-PLATE_ONLY_DROP_BUDGET = 0.05  # fraction of contact points, restricted to the plate
+# Worst case measured across every preset is 2.90% on mini_0.2_dense; the
+# default pose, which floats the model, drops nothing at all. It fell from 4.48%
+# when the base went from 3.0 mm tall to 1.4 mm: a shaft has to find a clear
+# column the full height of its base to land in, and a shorter base needs less
+# of one. Measurements, not aspirations.
+PLATE_ONLY_DROP_BUDGET = 0.035  # fraction of contact points, restricted to the plate
 
 # A **second measurement of a second implementation**, not a relaxation of the
 # one above. Do not merge the two and do not raise either to make a test pass.
@@ -68,13 +70,13 @@ PLATE_ONLY_DROP_BUDGET = 0.05  # fraction of contact points, restricted to the p
 # The lattice has to round somewhere and it always rounds toward refusing a
 # position, so the raster field was uniformly the worse of the two and carried
 # the looser budget. On this sample it no longer is: per preset it goes both
-# ways — 4 drops against the polygon field's 3 on mini_0.2, but 8 against 10 on
+# ways — 3 drops against the polygon field's 2 on mini_0.2, but 8 against 10 on
 # mini_0.2_dense — because refusing one route sends a shaft down a different one,
 # and quantisation is not the only thing that decides whether that one lands.
-# Worst case is 2.99% on mini_0.2_sparse, under the polygon field's worst, so
-# this budget is now the tighter of the two. That is what was measured, not a
-# claim that the raster field has got better.
-RASTER_PLATE_ONLY_DROP_BUDGET = 0.035
+# Worst case is 2.32% on mini_0.2_dense, under the polygon field's worst, so this
+# budget is now the tighter of the two. That is what was measured, not a claim
+# that the raster field has got better.
+RASTER_PLATE_ONLY_DROP_BUDGET = 0.028
 
 
 def _plate_only_drop_budget() -> float:

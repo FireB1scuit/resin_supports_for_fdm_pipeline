@@ -1384,7 +1384,7 @@ def _foot_radius(
     occupy the same column, so both are checked against the same ``total_h``
     (disc height plus join cone height) rather than their own slice of it.
 
-    A base is much fatter than the shaft it sits under — 5 mm against 1.2 mm —
+    A base is much fatter than the shaft it sits under — 10 mm against 1.2 mm —
     and until shafts routed around obstacles it was never in a position where
     that mattered: a blocked shaft stood on the model, so a shaft that reached
     the plate had reached it down a clear column. A routed shaft comes down

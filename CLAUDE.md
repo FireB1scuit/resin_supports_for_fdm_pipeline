@@ -190,7 +190,7 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   - The raster field is **slower**, and the lattice rounds toward *refusing* a position
     rather than allowing one, which is what keeps the self-printability invariant intact
     (violations are 0 under both). It is not reliably the one that drops more, though:
-    on the current sample it goes both ways per preset — 4 against 3 on `mini_0.2`, 8
+    on the current sample it goes both ways per preset — 3 against 2 on `mini_0.2`, 8
     against 10 on `mini_0.2_dense` — because refusing one route sends a shaft down
     another, and quantisation is not the only thing deciding whether that one lands.
     Hence two drop budgets in `tests/test_pipeline.py`; they are two measurements of two
@@ -205,7 +205,7 @@ If a push to `main` is ever attempted, stop and open a PR instead.
 - **`plate_only` is on by default: the build plate is the only landing.** A contact with
   no collision-free route down is left unheld and reported in `SupportBuild.warnings`,
   rather than propped off the sculpt. That trade is deliberate and measured in
-  `tests/test_pipeline.py` as `PLATE_ONLY_DROP_BUDGET` (~4.5% worst preset on the sample
+  `tests/test_pipeline.py` as `PLATE_ONLY_DROP_BUDGET` (~2.9% worst preset on the sample
   mini, and nothing at all in the default floated pose). What is left unheld is the flat
   underside of the base disc, in the ring where the body capsule hangs below it and
   blocks the way down. It used to be dimples on the upper surface of the head, back when
