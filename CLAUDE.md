@@ -281,6 +281,19 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   no site-packages for. `tests/test_build_web.py` pins all three, because every way it can
   go wrong is silent — a bundle that still says `'http'` looks fine until it fetches an
   API that is not there.
+- **Refresh the todo list in the UI before every push.** `todo notes.md` is the original;
+  the `<ul>` inside `#todolist` in `web/static/index.html` is a hand-kept copy of its
+  bullets, shown by the todo button in the top bar. Nothing syncs them, so re-copy them as
+  the last step before pushing, every time — read the file, and make the list items match
+  its bullets one for one, in order:
+  - Bullets only (`- …`), no headings, and drop the `- ` marker.
+  - Copy the wording **verbatim** — do not tidy, reword, shorten, or re-order. The point
+    is that the site says exactly what the notes say. HTML-escape what needs it.
+  - An item finished in this change comes out of `todo notes.md` first, then out of the
+    list; the two edits go in the same commit.
+  This is user-facing copy on the live site, so a stale list is a wrong statement to
+  visitors, not just an untidy file. It is also the one thing here nothing can catch for
+  you — check it even when the change had nothing to do with the todo list.
 - Run `pytest` before pushing.
 
 ## Layout
