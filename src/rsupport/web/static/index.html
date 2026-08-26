@@ -157,8 +157,22 @@
   #drop p { margin: 0; color: var(--dim); }
   #drop b { color: var(--c-support); }
 
+  /* The chips and the generate button both want the top of the canvas, and a
+     narrow window is not wide enough for both at their full width — so they are
+     one row rather than two corners that happen not to meet. The chips give way
+     (they wrap, and they wrap again), the button never does, and neither can
+     end up under the other whatever the window does.
+
+     The strip itself lets clicks through: it spans the canvas, and a band you
+     cannot orbit the model through would be a worse bargain than the collision
+     it prevents. */
+  #topbar {
+    position: absolute; left: 12px; right: 12px; top: 12px; z-index: 4;
+    display: flex; align-items: flex-start; gap: 10px;
+    pointer-events: none;
+  }
   #hud {
-    position: absolute; left: 12px; top: 12px; z-index: 4;
+    flex: 0 1 auto; min-width: 0; pointer-events: auto;
     display: flex; gap: 6px; flex-wrap: wrap;
   }
   #legend {
@@ -401,11 +415,11 @@
      its own said "something is happening" and nothing else; on the button it
      says which button is busy, and it gives the press that stops the run
      somewhere to land. */
-  #genwrap { position: absolute; right: 12px; top: 12px; z-index: 4; }
+  #genwrap { position: relative; flex: none; margin-left: auto; pointer-events: auto; }
 
   #generate {
     display: flex; align-items: center; justify-content: center; gap: 8px;
-    min-width: 148px; max-width: min(320px, 46vw);
+    min-width: 148px; max-width: 320px;
     padding: 10px 16px; font-size: 13.5px; border-radius: 8px;
     background: rgba(15,17,21,.86); border: 1px solid var(--line-2);
     color: var(--text); box-shadow: 0 6px 18px rgba(0,0,0,.35);
@@ -449,11 +463,6 @@
   }
   #genwrap:hover #gentip, #genwrap:focus-within #gentip { opacity: 1; visibility: visible; }
 
-  /* On a narrow window the button stops holding itself open — the label is
-     still the whole message, and the chips opposite need the room. */
-  @media (max-width: 560px) {
-    #generate { min-width: 0; padding: 9px 12px; }
-  }
 </style>
 </head>
 <body>
@@ -489,22 +498,24 @@
 <div id="stage">
   <canvas id="canvas"></canvas>
 
-  <!-- The only thing in the app that builds a scaffold. Pressed again while it
-       is running, it stops the run — see `generate` in app.js. -->
-  <div id="genwrap">
-    <button id="generate" type="button" aria-describedby="gentip" disabled>
-      <span class="spinner" aria-hidden="true"></span>
-      <span class="dot" aria-hidden="true"></span>
-      <span id="genlabel">generate</span>
-    </button>
-    <div id="gentip" role="tooltip">Generate the supports using this button</div>
-  </div>
+  <div id="topbar">
+    <div id="hud">
+      <button class="chip on" data-toggle="model">model</button>
+      <button class="chip on" data-toggle="supports">supports</button>
+      <button class="chip" data-toggle="points">contact points</button>
+      <button class="chip" data-toggle="wire">wireframe</button>
+    </div>
 
-  <div id="hud">
-    <button class="chip on" data-toggle="model">model</button>
-    <button class="chip on" data-toggle="supports">supports</button>
-    <button class="chip" data-toggle="points">contact points</button>
-    <button class="chip" data-toggle="wire">wireframe</button>
+    <!-- The only thing in the app that builds a scaffold. Pressed again while
+         it is running, it stops the run — see `generate` in app.js. -->
+    <div id="genwrap">
+      <button id="generate" type="button" aria-describedby="gentip" disabled>
+        <span class="spinner" aria-hidden="true"></span>
+        <span class="dot" aria-hidden="true"></span>
+        <span id="genlabel">generate</span>
+      </button>
+      <div id="gentip" role="tooltip">Generate the supports using this button</div>
+    </div>
   </div>
 
   <div id="legend">
