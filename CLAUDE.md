@@ -391,12 +391,34 @@ the raster backend and nothing else exercises it. To hold a branch next to what 
 `git worktree add ../rsfp-default feat/pipeline-foundation` and build that into its own
 directory on another port instead of stashing back and forth.
 
-**What Pages serves is the app, not the docs.** The workflow's `actions/configure-pages`
-step sets the Pages source to "GitHub Actions" on every run. Drop that step and the repo
-reverts to "Deploy from a branch", where Jekyll renders `README.md` into a themed page and
-publishes *that* at the site root — a green workflow and the wrong site, which is a
-genuinely confusing failure to diagnose. `.nojekyll` in the bundle is the other half of
-the same guard.
+**What Pages serves is the app, not the docs — check it, don't assume it.** This is the
+one failure here that a green workflow actively hides, and it has already happened once:
+every `pages` run succeeded for weeks while the URL served a Jekyll rendering of
+`README.md`.
+
+The mechanism is worth knowing, because the obvious fix is the one that failed. Pages has
+a *source*: "GitHub Actions" or "Deploy from a branch". On a branch source GitHub
+generates its own **`pages build and deployment`** run on every push, which builds
+`README.md` with Jekyll and deploys it — so both pipelines publish to one site on every
+push and the later one wins. `actions/configure-pages` with `enablement: true` does *not*
+settle this: it creates a site when there is none and otherwise logs that one exists,
+leaving a branch source exactly where it was. So `pages.yml` sets the source itself,
+`gh api -X PUT repos/$GITHUB_REPOSITORY/pages -f build_type=workflow`, before anything
+else. With the source on "workflow" GitHub stops generating the Jekyll run at all — the
+race is removed rather than won. `.nojekyll` in the bundle is a different guard, for a
+different Jekyll (the one that would eat `_`-prefixed files inside our own bundle).
+
+**Never take a green deploy as evidence the site is right.** The deploy job's last step
+fetches the published URL and fails unless it is our bundle — the root must not carry
+Jekyll's `generator` tag, and `/config.js` must be there with `RSUPPORT_TRANSPORT` in it.
+`tests/test_build_web.py` pins both that step and the `build_type=workflow` step, so
+deleting either fails the run that would have deployed. When touching `pages.yml`, Pages
+settings, or anything about publishing:
+
+1. keep those two steps, and
+2. open <https://fireb1scuit.github.io/resin_supports_for_fdm_pipeline/> after the run and
+   confirm it is the app. `curl -s <url> | grep -c Jekyll` answers it in one line — any
+   hit means the README is live again and the source has reverted.
 
 `Dockerfile` pins **3.12**, not 3.14, for the same wheel reason as above — every
 dependency has a cp312 manylinux wheel, so the image needs no compiler. The
