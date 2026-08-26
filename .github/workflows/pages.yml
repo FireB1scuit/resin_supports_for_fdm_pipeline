@@ -5,10 +5,12 @@
 # somewhere: no CPU per user, no upload of anyone's model, and nothing to
 # keep running.
 #
-# The build job points Pages at this workflow itself, so there is nothing to
-# click in Settings. If that step is ever removed, the repo falls back to
-# "Deploy from a branch" and Pages serves a Jekyll rendering of README.md
-# instead of the app.
+# Pages has one setting this workflow cannot set for itself: the *source*
+# must be "GitHub Actions", not "Deploy from a branch". CI is not allowed to
+# change it (see the step below), so it is a one-time click in Settings -> Pages
+# - and on a branch source the site serves a Jekyll rendering of README.md
+# instead of the app, however green this workflow is. The last step of the
+# deploy job is what catches that.
 
 name: pages
 
@@ -38,31 +40,64 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      # Set the Pages *source* to this workflow, every run.
+      # Ask for the Pages *source* to be this workflow rather than a branch.
       #
-      # This is deliberately a raw API call and not `configure-pages`'
-      # `enablement: true`. That option only *creates* a site when none exists;
-      # against a repo whose Pages is already on "Deploy from a branch" it logs
-      # that the site exists and moves on, leaving the branch source in place.
-      # The symptom is nasty: GitHub keeps running its own built-in
-      # "pages build and deployment" workflow for the branch source, Jekyll
-      # renders README.md, and *both* pipelines deploy on every push. Whichever
-      # finishes last wins, and Jekyll's Docker build usually beats ours by a
-      # second or two — so the site served the README while this workflow went
-      # green on every run.
+      # Why this matters: on a branch source GitHub generates its own built-in
+      # "pages build and deployment" run on every push, builds README.md with
+      # Jekyll, and deploys that to the same site. Two publishers, one URL, and
+      # Jekyll's run usually lands a second or two after ours — which is how the
+      # site served the README for weeks while every run here went green.
       #
-      # PUT updates an existing site; the POST covers a repo where Pages has
-      # never been turned on (PUT 404s there). Once the source is "workflow"
-      # GitHub stops generating the Jekyll run, so the race disappears rather
-      # than being won.
+      # Why it is only an attempt: GITHUB_TOKEN cannot change Pages settings.
+      # Its `pages: write` covers *deployments*; the settings endpoints answer
+      # 403 "Resource not accessible by integration" to it, and
+      # `actions/configure-pages`' `enablement: true` hits the same wall (it
+      # also only ever *creates* a site — it will not move an existing one off a
+      # branch). So this needs either a hand on Settings -> Pages -> Source, or
+      # a PAT with repo admin rights in the PAGES_SOURCE_TOKEN secret. Both are
+      # one-time; the source stays where it is put.
+      #
+      # Failing the build here would only stop the deploy that is about to
+      # correct the site, so this warns instead. The step that actually holds
+      # the line is "Check the site serves the app" at the end of the deploy
+      # job: it fails if the README is what came back.
       - name: Point Pages at this workflow, not at a branch
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.PAGES_SOURCE_TOKEN || github.token }}
         run: |
-          gh api -X PUT "repos/$GITHUB_REPOSITORY/pages" -f build_type=workflow \
-            || gh api -X POST "repos/$GITHUB_REPOSITORY/pages" -f build_type=workflow
+          set -u
+          err="$RUNNER_TEMP/pages-source.err"
+          if [ "$(gh api "repos/$GITHUB_REPOSITORY/pages" --jq .build_type 2>/dev/null)" = workflow ]; then
+            echo "Pages source is already this workflow."
+            exit 0
+          fi
+          # PUT updates a site that exists; POST covers a repo where Pages has
+          # never been turned on, where PUT answers 404.
+          if gh api -X PUT "repos/$GITHUB_REPOSITORY/pages" -f build_type=workflow 2>"$err"; then
+            echo "Pages source set to this workflow."
+            exit 0
+          fi
+          if gh api -X POST "repos/$GITHUB_REPOSITORY/pages" -f build_type=workflow 2>>"$err"; then
+            echo "Pages enabled, with this workflow as its source."
+            exit 0
+          fi
+          sed 's/^/  /' "$err"
+          echo "::warning title=Pages source not set from CI::The site may serve README.md instead of the app - see this step's log."
+          cat <<'EOF'
+
+          Could not set the Pages source from CI (the 403 above is expected with
+          GITHUB_TOKEN - it is not allowed to change Pages settings).
+
+          Fix it once, either way:
+            * Settings -> Pages -> Build and deployment -> Source: GitHub Actions
+            * or add a PAT with repo admin rights as the PAGES_SOURCE_TOKEN secret
+
+          Until then GitHub keeps building README.md with Jekyll on every push and
+          racing this workflow to publish it. The check at the end of the deploy
+          job will fail if that is what wins.
+          EOF
 
       - uses: actions/configure-pages@v5
 
@@ -124,9 +159,16 @@ jobs:
             echo "attempt $attempt: no config.js yet at $URL"
           done
           echo "::error::$URL is not serving the bundle this workflow just built."
-          echo "If the root is Jekyll's README, the Pages source reverted to a branch:"
-          echo "check Settings -> Pages, and that the 'Point Pages at this workflow'"
-          echo "step above still runs. A one-off failure right after the source is"
-          echo "switched can also be an in-flight Jekyll run landing last — re-run"
-          echo "this workflow, and it should stay fixed."
+          cat <<'EOF'
+
+          If the root came back as Jekyll's README, the Pages source is a branch
+          rather than this workflow, and GitHub's own Jekyll run beat us to the
+          site. Nothing in CI can change that setting - see the "Point Pages at
+          this workflow" step in the build job. Fix it once:
+
+            Settings -> Pages -> Build and deployment -> Source: GitHub Actions
+
+          then re-run this workflow. Immediately after switching, one last
+          in-flight Jekyll run can still land after ours; a re-run settles it.
+          EOF
           exit 1

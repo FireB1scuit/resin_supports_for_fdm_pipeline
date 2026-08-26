@@ -396,29 +396,40 @@ one failure here that a green workflow actively hides, and it has already happen
 every `pages` run succeeded for weeks while the URL served a Jekyll rendering of
 `README.md`.
 
-The mechanism is worth knowing, because the obvious fix is the one that failed. Pages has
-a *source*: "GitHub Actions" or "Deploy from a branch". On a branch source GitHub
-generates its own **`pages build and deployment`** run on every push, which builds
-`README.md` with Jekyll and deploys it — so both pipelines publish to one site on every
-push and the later one wins. `actions/configure-pages` with `enablement: true` does *not*
-settle this: it creates a site when there is none and otherwise logs that one exists,
-leaving a branch source exactly where it was. So `pages.yml` sets the source itself,
-`gh api -X PUT repos/$GITHUB_REPOSITORY/pages -f build_type=workflow`, before anything
-else. With the source on "workflow" GitHub stops generating the Jekyll run at all — the
-race is removed rather than won. `.nojekyll` in the bundle is a different guard, for a
-different Jekyll (the one that would eat `_`-prefixed files inside our own bundle).
+The mechanism, because the obvious fixes are the ones that failed. Pages has a *source*:
+"GitHub Actions" or "Deploy from a branch". On a branch source GitHub generates its own
+**`pages build and deployment`** run on every push, builds `README.md` with Jekyll and
+deploys it — so two pipelines publish to one site on every push and the later one wins,
+which was Jekyll by a second or two. Setting the source to "GitHub Actions" is therefore
+the whole fix: GitHub then stops generating that run and the race is gone rather than won.
+
+**CI cannot set it.** `GITHUB_TOKEN`'s `pages: write` covers *deployments* only; the Pages
+settings endpoints answer it `403 Resource not accessible by integration`, and
+`actions/configure-pages` with `enablement: true` hits the same wall — and even with a
+token would only *create* a missing site, never move an existing one off a branch. So the
+source is a **one-time human setting**: Settings → Pages → Build and deployment → Source:
+GitHub Actions. `pages.yml` still asks for it on every run (a PAT in the optional
+`PAGES_SOURCE_TOKEN` secret makes the ask succeed), but only *warns* when refused: failing
+there would stop the very deploy that fixes the site. `.nojekyll` in the bundle is a
+different guard, for a different Jekyll — the one that would eat `_`-prefixed files inside
+our own bundle.
 
 **Never take a green deploy as evidence the site is right.** The deploy job's last step
 fetches the published URL and fails unless it is our bundle — the root must not carry
 Jekyll's `generator` tag, and `/config.js` must be there with `RSUPPORT_TRANSPORT` in it.
-`tests/test_build_web.py` pins both that step and the `build_type=workflow` step, so
-deleting either fails the run that would have deployed. When touching `pages.yml`, Pages
-settings, or anything about publishing:
+That check is the guard that actually holds; `tests/test_build_web.py` pins both it and
+the source-setting step, so deleting either fails the run that would have deployed. When
+touching `pages.yml`, Pages settings, or anything about publishing:
 
 1. keep those two steps, and
 2. open <https://fireb1scuit.github.io/resin_supports_for_fdm_pipeline/> after the run and
-   confirm it is the app. `curl -s <url> | grep -c Jekyll` answers it in one line — any
-   hit means the README is live again and the source has reverted.
+   confirm it is the app. `curl -s <url> | grep -c Jekyll` answers it in one line — any hit
+   means the README is live again and the source has reverted. "Site not found" means Pages
+   is off, or the source was just switched and no workflow deploy has landed yet.
+
+One version pin worth knowing before bumping the Pages actions: **`upload-pages-artifact`
+v4+ drops dotfiles**, which would silently take `.nojekyll` out of the bundle. v5 restores
+them behind `include-hidden-files: true`. v3 is pinned here deliberately.
 
 `Dockerfile` pins **3.12**, not 3.14, for the same wheel reason as above — every
 dependency has a cp312 manylinux wheel, so the image needs no compiler. The
