@@ -37,7 +37,19 @@ const state = {
 //: point list, so this is bounded memory for an unbounded session.
 const UNDO_DEPTH = 32;
 
-const $ = (id) => document.getElementById(id);
+/** Every element this file reaches for is one the page is expected to have, so
+ *  a miss is never a case to handle — it means the script and the markup are
+ *  not the same generation. That happens for real: a browser holding a cached
+ *  `app.js` against a freshly deployed `index.html` (or the reverse) runs code
+ *  against a page it was never written for. Left alone it surfaces a few frames
+ *  later as "Cannot read properties of null", naming neither the element nor
+ *  the cause; the bundle stamps its asset URLs to stop the mismatch happening
+ *  at all, and this says so plainly if one ever slips through. */
+const $ = (id) => {
+  const el = document.getElementById(id);
+  if (!el) throw new Error(`no #${id} on the page — reload to pick up a matching app.js`);
+  return el;
+};
 const loader = new STLLoader();
 
 // ---------------------------------------------------------------- scene
