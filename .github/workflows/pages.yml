@@ -5,10 +5,10 @@
 # somewhere: no CPU per user, no upload of anyone's model, and nothing to
 # keep running.
 #
-# The build job flips Pages to the "GitHub Actions" source itself, so there is
-# nothing to click in Settings. If that step is ever removed, the repo falls
-# back to "Deploy from a branch" and Pages serves a Jekyll rendering of
-# README.md instead of the app.
+# The build job points Pages at this workflow itself, so there is nothing to
+# click in Settings. If that step is ever removed, the repo falls back to
+# "Deploy from a branch" and Pages serves a Jekyll rendering of README.md
+# instead of the app.
 
 name: pages
 
@@ -40,16 +40,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Switches Pages to the "GitHub Actions" source, and turns Pages on if it
-      # is off. Without this the repo stays on "Deploy from a branch", where
-      # Jekyll renders README.md into a themed page and serves *that* — the
-      # docs, not the app. The workflow can run green and the site still show
-      # the wrong thing, which is exactly what happened.
+      # Set the Pages *source* to this workflow, every run.
       #
-      # `enablement: true` needs the `pages: write` permission granted above.
+      # This is deliberately a raw API call and not `configure-pages`'
+      # `enablement: true`. That option only *creates* a site when none exists;
+      # against a repo whose Pages is already on "Deploy from a branch" it logs
+      # that the site exists and moves on, leaving the branch source in place.
+      # The symptom is nasty: GitHub keeps running its own built-in
+      # "pages build and deployment" workflow for the branch source, Jekyll
+      # renders README.md, and *both* pipelines deploy on every push. Whichever
+      # finishes last wins, and Jekyll's Docker build usually beats ours by a
+      # second or two — so the site served the README while this workflow went
+      # green on every run.
+      #
+      # PUT updates an existing site; the POST covers a repo where Pages has
+      # never been turned on (PUT 404s there). Once the source is "workflow"
+      # GitHub stops generating the Jekyll run, so the race disappears rather
+      # than being won.
+      - name: Point Pages at this workflow, not at a branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X PUT "repos/$GITHUB_REPOSITORY/pages" -f build_type=workflow \
+            || gh api -X POST "repos/$GITHUB_REPOSITORY/pages" -f build_type=workflow
+
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - uses: actions/setup-python@v5
         with:
@@ -84,3 +99,34 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+      # A green deploy is not evidence that the site serves the app: for months
+      # every deploy here succeeded while the URL returned Jekyll's README. So
+      # ask the site what it is actually serving, and fail loudly if it is the
+      # docs. Two probes, because either alone can mislead — the marker file
+      # exists only in our bundle, and the generator tag exists only in
+      # Jekyll's output.
+      - name: Check the site serves the app, not the README
+        env:
+          URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          set -u
+          for attempt in 1 2 3 4 5 6; do
+            [ "$attempt" -gt 1 ] && sleep 20
+            root=$(curl -fsS --max-time 30 "$URL" || true)
+            config=$(curl -fsS --max-time 30 "${URL%/}/config.js" || true)
+            case "$root" in *'content="Jekyll'*)
+              echo "attempt $attempt: still the Jekyll build of README.md"; continue;;
+            esac
+            case "$config" in *RSUPPORT_TRANSPORT*)
+              echo "$URL is serving the app"; exit 0;;
+            esac
+            echo "attempt $attempt: no config.js yet at $URL"
+          done
+          echo "::error::$URL is not serving the bundle this workflow just built."
+          echo "If the root is Jekyll's README, the Pages source reverted to a branch:"
+          echo "check Settings -> Pages, and that the 'Point Pages at this workflow'"
+          echo "step above still runs. A one-off failure right after the source is"
+          echo "switched can also be an in-flight Jekyll run landing last — re-run"
+          echo "this workflow, and it should stay fixed."
+          exit 1

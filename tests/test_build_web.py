@@ -96,3 +96,29 @@ def test_rebuilding_over_an_existing_bundle_is_clean(tmp_path):
     litter.write_text("// left over", encoding="utf-8")
     build(out)
     assert not litter.exists()
+
+
+# The workflow is not the bundle, but it is the other half of "what the site
+# serves". These two guards were written after the site spent weeks quietly
+# serving README.md: `configure-pages`' `enablement` flag turns Pages *on* but
+# will not move an already-enabled repo off "Deploy from a branch", so GitHub
+# kept building README.md with Jekyll in parallel and that build landed last.
+# Deleting either step below brings the whole failure back, and it is invisible
+# from a green workflow — hence pinning them here, where the deploy gate runs.
+
+PAGES_WORKFLOW = ROOT / ".github" / "workflows" / "pages.yml"
+
+
+def test_the_workflow_forces_the_pages_source_to_this_workflow():
+    """Without this the repo stays on "Deploy from a branch": Jekyll renders
+    README.md, deploys it alongside the bundle, and usually wins the race."""
+    text = PAGES_WORKFLOW.read_text(encoding="utf-8")
+    assert "build_type=workflow" in text
+
+
+def test_the_workflow_checks_what_the_site_actually_serves():
+    """A deploy going green says nothing about the URL — that is exactly how
+    this went unnoticed. The published site has to be asked."""
+    text = PAGES_WORKFLOW.read_text(encoding="utf-8")
+    assert 'content="Jekyll' in text, "nothing detects a README being served"
+    assert "RSUPPORT_TRANSPORT" in text, "nothing confirms the bundle is served"
