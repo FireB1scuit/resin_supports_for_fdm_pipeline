@@ -287,6 +287,16 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   — controls on screen with no listeners on them, which move, show their value, and do
   nothing. It is indistinguishable from a broken generator and cost a round of
   debugging the wrong layer. Do not "optimise" the header away.
+  **A static host answers to nobody, so the bundle carries its own version of this
+  guard**: `build_web.py` stamps every URL one bundled file uses to reach another with
+  a hash of the bundle, so a deploy is a new set of URLs and a page can only load the
+  scripts it shipped with. The same pairing on Pages showed up as a sample that would
+  not load — a cached `app.js` toggling a class on `#work` after the markup dropped the
+  element, dying in `busy()` before `upload()`'s own try block, so what reached the log
+  was `could not load the sample: Cannot read properties of null (reading 'classList')`
+  and nothing about caching. `$()` in `app.js` now throws by name for the same reason:
+  a missing element is never a case to handle here, it is the two files being different
+  generations, and the error should say so.
 - **There are two front ends and the logic belongs to neither.** `web/core.py` holds every
   stage as a plain function over a `Session` and imports no fastapi. `web/app.py` is HTTP
   translation only; `web/browser.py` is the same routes dispatched in-process for the
@@ -304,11 +314,14 @@ If a push to `main` is ever attempted, stop and open a PR instead.
     see the avoidance rule above.
 - **`scripts/build_web.py` is not a frontend build step.** No bundler, no transpiler, no
   Node, no package.json — the CLAUDE.md rule above still holds and this respects it. It
-  copies `static/`, rewrites the one line in `config.js` that selects the transport, and
+  copies `static/`, rewrites the one line in `config.js` that selects the transport,
   zips the package so the worker can unpack it into a virtual filesystem the browser has
-  no site-packages for. `tests/test_build_web.py` pins all three, because every way it can
+  no site-packages for, and stamps the cross-file URLs with a bundle hash (see the
+  caching rule above). `tests/test_build_web.py` pins all four, because every way it can
   go wrong is silent — a bundle that still says `'http'` looks fine until it fetches an
-  API that is not there.
+  API that is not there, and one un-stamped URL looks fine until somebody's browser
+  pairs it with the wrong deploy. `ASSET_LINKS` is a hand-kept list of what loads what,
+  so a rename that leaves it behind fails the build rather than shipping a stale link.
 - **Refresh the todo list in the UI before every push.** `todo notes.md` is the original;
   the `<ul>` inside `#todolist` in `web/static/index.html` is a hand-kept copy of its
   bullets, shown by the todo button in the top bar. Nothing syncs them, so re-copy them as
@@ -406,10 +419,11 @@ instead, and reproduce the *right one*: there are two front ends and they take t
   Two things bite here. It is a copy, not a watcher: every edit to `static/` or to the
   package needs a rebuild before the tab can show it, and `dist/` is gitignored so a stale
   bundle from another branch sits there looking current. And `http.server` sends no cache
-  headers, which brings back exactly the failure `_RevalidatingStatic` exists to prevent —
-  hard-reload or keep DevTools' "Disable cache" on, or you get the new `index.html`
-  driving a cached `app.js`. Pyodide itself comes from the CDN, so the first load needs
-  network.
+  headers, which used to bring back exactly the failure `_RevalidatingStatic` exists to
+  prevent; the stamped URLs now cover it, since a rebuild changes them and the browser has
+  nothing cached under the new names. `index.html` itself is still fetched by a fixed URL,
+  so a hard-reload is still the reliable way to be sure you are looking at the rebuild.
+  Pyodide itself comes from the CDN, so the first load needs network.
 
 Before opening the PR, run what the workflow gates on — `python -m pytest
 tests/test_build_web.py tests/test_browser.py` — and the whole suite the browser's way

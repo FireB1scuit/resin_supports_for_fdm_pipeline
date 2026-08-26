@@ -9,14 +9,16 @@ and a model never leaves the machine it was opened on.
 
 This is **not a frontend build step**. There is no bundler, no transpiler, no
 Node and no package.json — CLAUDE.md rules those out and this respects that.
-It does three things a shell copy could do, and stays a script only because
+It does four things a shell copy could do, and stays a script only because
 doing them by hand is easy to get subtly wrong:
 
 1. copies ``web/static`` across verbatim;
 2. rewrites ``config.js`` to select the worker transport, which is the one line
    of difference between the served app and the hosted one;
 3. zips the ``rsupport`` package so the Pyodide worker can unpack it into its
-   virtual filesystem — the browser has no site-packages to install into.
+   virtual filesystem — the browser has no site-packages to install into;
+4. stamps every URL one bundled file uses to reach another with a hash of the
+   bundle, so a browser cannot pair a cached script with a newer page.
 
 The zip is the reason this exists at all: the browser needs the Python source as
 one fetchable artefact, and keeping a second copy of the package in ``static/``
@@ -26,6 +28,7 @@ would be a copy to forget to update.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import shutil
 import sys
 import zipfile
@@ -50,6 +53,63 @@ def _skip(rel: Path) -> bool:
     if posix in SKIP_MODULES:
         return True
     return any(part == d or posix.startswith(f"{d}/") for part in rel.parts for d in SKIP_DIRS)
+
+
+#: Every reference one bundled file makes to another, as the exact text to find.
+#: These are the URLs a browser caches separately, and cached separately they
+#: can be served from different deploys: an `index.html` that has just been
+#: re-fetched loading an `app.js` still inside its freshness window. The two
+#: then disagree about what the page contains — the symptom that prompted this
+#: was a cached `app.js` toggling a class on `#work`, an element the newer
+#: markup no longer has — and the error surfaces far from the cause. Stamping
+#: each URL with a hash of the bundle makes every deploy a new set of URLs, so
+#: a page can only ever load the scripts it shipped with.
+#:
+#: Each entry must match exactly once. A silent miss would ship a bundle that
+#: looks stamped and still has one un-versioned URL left to go stale.
+ASSET_LINKS: dict[str, tuple[str, ...]] = {
+    "index.html": ("./config.js", "./app.js", "./three.module.js"),
+    "app.js": ("./OrbitControls.js", "./STLLoader.js", "./transport.js"),
+    "transport.js": ("./worker.js",),
+    "worker.js": ("./rsupport_src.zip",),
+}
+
+
+def bundle_hash(out_dir: Path) -> str:
+    """A short digest of everything in the bundle, path names included.
+
+    Taken before stamping, so it depends on what the files say rather than on
+    what they are about to be told to call each other. Any edit anywhere moves
+    it, which is blunter than per-file hashing — one changed line re-downloads
+    three.module.js — but it is a megabyte against a class of bug that only
+    shows up in someone else's browser, and it cannot get the invalidation
+    wrong the way per-file hashing can when the graph is wired by hand.
+    """
+    h = hashlib.sha256()
+    for path in sorted(p for p in out_dir.rglob("*") if p.is_file()):
+        h.update(path.relative_to(out_dir).as_posix().encode())
+        h.update(path.read_bytes())
+    return h.hexdigest()[:12]
+
+
+def stamp_asset_links(out_dir: Path, version: str) -> int:
+    """Rewrite each cross-file URL to carry `?v=<version>`."""
+    stamped = 0
+    for name, links in ASSET_LINKS.items():
+        path = out_dir / name
+        text = path.read_text(encoding="utf-8")
+        for link in links:
+            found = text.count(link)
+            if found != 1:
+                raise SystemExit(
+                    f"{name} refers to {link} {found} times, expected exactly once — "
+                    "the bundle would ship a URL that outlives the deploy that wrote "
+                    "it. Fix ASSET_LINKS in scripts/build_web.py."
+                )
+            text = text.replace(link, f"{link}?v={version}")
+            stamped += 1
+        path.write_text(text, encoding="utf-8")
+    return stamped
 
 
 def build_source_zip(dest: Path) -> int:
@@ -95,9 +155,14 @@ def build(out_dir: Path) -> None:
 
     modules = build_source_zip(out_dir / "rsupport_src.zip")
 
+    # Last, so the digest covers the source zip and the rewritten config too.
+    version = bundle_hash(out_dir)
+    links = stamp_asset_links(out_dir, version)
+
     total = sum(p.stat().st_size for p in out_dir.rglob("*") if p.is_file())
     print(f"wrote {out_dir}")
     print(f"  {modules} python modules zipped")
+    print(f"  {links} asset urls stamped ?v={version}")
     print(f"  {total / 1e6:.1f} MB of static files")
     print()
     print("Serve it with any static host. To try it locally:")

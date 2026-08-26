@@ -10,6 +10,7 @@ found in production.
 
 from __future__ import annotations
 
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -17,7 +18,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from build_web import build  # noqa: E402
+from build_web import ASSET_LINKS, build, stamp_asset_links  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "src" / "rsupport" / "web" / "static"
@@ -134,3 +135,75 @@ def test_the_workflow_deploys_after_githubs_jekyll_build():
     text = PAGES_WORKFLOW.read_text(encoding="utf-8")
     wait = text.index('"pages build and deployment"')
     assert wait < text.index("actions/deploy-pages@"), "the wait must precede the deploy"
+
+
+# `index.html` and `app.js` are separate URLs and a browser caches them
+# separately, so across a deploy it is free to pair one generation's page with
+# another's script. That is not hypothetical: a cached `app.js` went on toggling
+# a class on `#work` after the markup dropped the element, and every attempt to
+# load a model died on `Cannot read properties of null (reading 'classList')` —
+# thrown from `busy()`, before `upload()`'s own try block, so it surfaced as a
+# sample that would not load rather than as anything about caching. The served
+# app answers this with `Cache-Control: no-cache`; a static host answers to
+# nobody, so the bundle has to make the URLs themselves unrepeatable.
+
+STAMP = re.compile(r"\?v=[0-9a-f]{12}")
+
+
+def test_every_cross_file_url_is_stamped(bundle):
+    """One un-stamped link is enough to bring the whole failure back: it is the
+    file that goes stale, and it takes the generation it belongs to with it."""
+    for name, links in ASSET_LINKS.items():
+        text = (bundle / name).read_text(encoding="utf-8")
+        for link in links:
+            assert re.search(re.escape(link) + r"\?v=[0-9a-f]{12}", text), \
+                f"{name} loads {link} unversioned"
+
+
+def test_the_whole_bundle_shares_one_stamp(bundle):
+    """The stamp is what makes a generation a set. Two values in one bundle
+    would mean two of them, which is the state being ruled out."""
+    stamps = set()
+    for name in ASSET_LINKS:
+        stamps.update(STAMP.findall((bundle / name).read_text(encoding="utf-8")))
+    assert len(stamps) == 1, f"the bundle disagrees with itself: {sorted(stamps)}"
+
+
+def test_the_stamp_follows_the_contents(tmp_path):
+    """A stamp that does not move when a file does is a cache that never
+    clears — the failure, with the fix in place looking like it is working."""
+    def stamp_of(out: Path) -> str:
+        return STAMP.search((out / "index.html").read_text(encoding="utf-8")).group()
+
+    first = tmp_path / "a"
+    build(first)
+    again = tmp_path / "b"
+    build(again)
+    assert stamp_of(first) == stamp_of(again), "identical sources, different stamps"
+
+    app = STATIC / "app.js"
+    original = app.read_bytes()
+    try:
+        app.write_bytes(original + b"\n// a change somebody deployed\n")
+        after = tmp_path / "c"
+        build(after)
+    finally:
+        app.write_bytes(original)
+    assert stamp_of(after) != stamp_of(first), "a changed app.js left the urls alone"
+
+
+def test_a_link_that_moved_stops_the_build(tmp_path):
+    """`ASSET_LINKS` is a hand-kept list of what loads what, so renaming a file
+    or rewiring an import silently takes an entry out of use. Every way this
+    script goes wrong is silent, and this one especially: the bundle looks
+    stamped and ships one URL still able to outlive its deploy. It has to be a
+    failed build rather than a quieter bug."""
+    out = tmp_path / "dist"
+    build(out)
+    html = out / "index.html"
+    html.write_text(
+        html.read_text(encoding="utf-8").replace("./app.js?v=", "./main.js?v="),
+        encoding="utf-8",
+    )
+    with pytest.raises(SystemExit, match="expected exactly once"):
+        stamp_asset_links(out, "deadbeef1234")
