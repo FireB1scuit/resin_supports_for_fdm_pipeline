@@ -109,9 +109,12 @@ def test_rebuilding_over_an_existing_bundle_is_clean(tmp_path):
 PAGES_WORKFLOW = ROOT / ".github" / "workflows" / "pages.yml"
 
 
-def test_the_workflow_forces_the_pages_source_to_this_workflow():
-    """Without this the repo stays on "Deploy from a branch": Jekyll renders
-    README.md, deploys it alongside the bundle, and usually wins the race."""
+def test_the_workflow_asks_for_the_pages_source_to_be_this_workflow():
+    """On a branch source Jekyll renders README.md, deploys it alongside the
+    bundle, and usually wins the race. CI is not allowed to change that setting
+    with GITHUB_TOKEN, so the request is best-effort — but it is what makes a
+    PAT in PAGES_SOURCE_TOKEN fix the site without anyone editing the workflow,
+    and it is where the log explains the manual fix when it is refused."""
     text = PAGES_WORKFLOW.read_text(encoding="utf-8")
     assert "build_type=workflow" in text
 
