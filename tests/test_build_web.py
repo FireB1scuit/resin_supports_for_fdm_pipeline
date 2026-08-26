@@ -125,3 +125,12 @@ def test_the_workflow_checks_what_the_site_actually_serves():
     text = PAGES_WORKFLOW.read_text(encoding="utf-8")
     assert 'content="Jekyll' in text, "nothing detects a README being served"
     assert "RSUPPORT_TRANSPORT" in text, "nothing confirms the bundle is served"
+
+
+def test_the_workflow_deploys_after_githubs_jekyll_build():
+    """While the Pages source is a branch, GitHub builds README.md alongside us
+    and the site keeps whichever deployment lands last. Ours has to be second,
+    so the wait has to come before the deploy."""
+    text = PAGES_WORKFLOW.read_text(encoding="utf-8")
+    wait = text.index('"pages build and deployment"')
+    assert wait < text.index("actions/deploy-pages@"), "the wait must precede the deploy"

@@ -26,6 +26,9 @@ on:
   workflow_dispatch:
 
 permissions:
+  # `actions: read` is for the Jekyll-race step in the deploy job, which has
+  # to see GitHub's own run on this commit.
+  actions: read
   contents: read
   pages: write
   id-token: write
@@ -132,6 +135,42 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # Wait out GitHub's Jekyll build before deploying over it.
+      #
+      # This is the belt to the previous step's braces. While the Pages source
+      # is a branch, GitHub builds README.md with Jekyll on every push and
+      # deploys it to this same site, and the site keeps whichever deployment
+      # lands last. That is a coin flip decided by how long `pip install` takes:
+      # the README has won it for weeks, and once, by 36 seconds, the app did.
+      #
+      # So look for that run on this commit and let it finish first. Deploying
+      # afterwards makes ours the last one, every time, without needing the
+      # setting CI is not allowed to change. Once the source *is* "GitHub
+      # Actions" GitHub stops generating the run at all and this step finds
+      # nothing and returns at once — it costs nothing to leave in.
+      - name: Let GitHub's Jekyll build of README.md finish first
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          query="repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$GITHUB_SHA&per_page=100"
+          filter='[.workflow_runs[]
+                   | select(.name == "pages build and deployment")
+                   | select(.status != "completed")] | length'
+          for attempt in $(seq 1 20); do
+            # A failure here (permissions, API hiccup) must not block the
+            # deploy: not waiting is the old behaviour, not a new failure.
+            n=$(gh api "$query" --jq "$filter" 2>/dev/null || echo 0)
+            if [ "${n:-0}" -eq 0 ]; then
+              [ "$attempt" -eq 1 ] && echo "No Jekyll build in flight for this commit."
+              exit 0
+            fi
+            echo "attempt $attempt: $n Jekyll run(s) still going — waiting to deploy last"
+            sleep 15
+          done
+          echo "::warning::Jekyll is still building after 5 minutes; deploying anyway."
+          echo "If the site ends up showing README.md, re-run this workflow."
+
       - id: deployment
         uses: actions/deploy-pages@v4
 

@@ -414,6 +414,13 @@ there would stop the very deploy that fixes the site. `.nojekyll` in the bundle 
 different guard, for a different Jekyll — the one that would eat `_`-prefixed files inside
 our own bundle.
 
+Until that setting is changed, the deploy job **waits out GitHub's Jekyll run on the same
+commit before deploying**, so ours is the deployment that lands last and the site is right
+whichever way the setting is pointing. It is a workaround, not the fix — it costs a minute
+per deploy and it only wins a race that should not be run — but it holds without anyone's
+hand on Settings. Once the source is "GitHub Actions" there is no such run to wait for and
+the step returns immediately.
+
 **Never take a green deploy as evidence the site is right.** The deploy job's last step
 fetches the published URL and fails unless it is our bundle — the root must not carry
 Jekyll's `generator` tag, and `/config.js` must be there with `RSUPPORT_TRANSPORT` in it.
