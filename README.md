@@ -158,10 +158,12 @@ Merging to the default branch publishes it automatically via
    you — it uses the pose exactly as authored, and floats it above the plate.
 2. **Drop the STL onto the page** (or click to browse). `.stl`, `.obj`, `.ply`,
    `.3mf` and `.off` all load.
-3. It runs immediately — finds the overhangs and islands, places contact points,
-   builds the supports. A few hundred milliseconds for a typical mini. The log
-   at the bottom right tells you what it did and flags anything odd.
-4. **Look at it, adjust, download.**
+3. The first run happens on its own — it finds the overhangs and islands, places
+   contact points, builds the supports. A few hundred milliseconds for a typical
+   mini. The log at the bottom right tells you what it did and flags anything odd.
+4. **Look at it, adjust, press generate, download.** Nothing after that first run
+   rebuilds by itself: moving a dial marks the scaffold on screen as out of date
+   and the **generate** button top-right builds the new one.
 
 ## Reading the viewport
 
@@ -175,6 +177,19 @@ Buttons top-left toggle each layer:
 | **wireframe** | see through the model |
 
 Drag to orbit, scroll to zoom.
+
+Top-right is **generate**, which is the only thing that builds a scaffold.
+
+| It looks like | It means |
+|---|---|
+| dimmed | nothing loaded yet |
+| dark, outlined | what you are looking at is what the dials say |
+| **bright white, with a dot** | you have changed something; the scaffold on screen is the old answer |
+| spinning, naming a stage | it is building. **Press it again to stop** |
+
+Stopping is immediate on the local app. On the hosted site the pipeline runs
+inside the tab on a single thread, so it finishes the stage it is in first and
+the button says `stopping` until it does.
 
 The two reds are the whole point of that third toggle:
 
@@ -199,7 +214,9 @@ The automatic placement is a starting point, not a verdict.
 - **Add one** — shift-click anywhere on the model. Hand-placed supports are
   marked mandatory and never get thinned away.
 
-Either edit rebuilds only the geometry, so it comes back in well under a second.
+Either edit takes effect on screen at once and marks the scaffold out of date;
+pressing **generate** rebuilds the geometry alone, which takes well under a
+second. **ctrl-Z** walks back through hand edits.
 
 ## The controls
 
@@ -225,11 +242,18 @@ Either edit rebuilds only the geometry, so it comes back in well under a second.
 | **base ø** | width of the disc each shaft stands on | supports peel off the plate mid-print (raise); the raft is welded to the bed and impossible to remove (lower) |
 | **base height** | how tall that disc is | the same trade, but height buys grip without eating more bed area |
 
-Changing **tip ø**, **shaft ø**, **tip style**, any of the **cross-link**
-controls, **supports from plate only** or either **base**
-dimension rebuilds geometry only, which is fast. Changing **spacing** or
-**overhang** re-decides where supports go, which takes a moment longer. Changing
-**lift** moves the model, so it redoes both. Sliders act on release, not on drag.
+None of these rebuild anything on their own — move as many as you like, then
+press **generate** once. What that press costs depends on the most expensive
+thing you touched. **tip ø**, **shaft ø**, **tip style**, any of the
+**cross-link** controls, **supports from plate only** and either **base**
+dimension rebuild the geometry only, which is fast. **spacing** and **overhang**
+re-decide where the supports go, which takes a moment longer. **lift** moves the
+model, so it does both — the model itself follows the slider straight away, and
+the scaffold stops reaching it until you rebuild.
+
+Rotating is the exception: the model turns as you drag, because choosing a pose
+by eye is impossible otherwise. The scaffold it had is dropped when it does,
+since that one was built for a pose the model is no longer in.
 
 ## Orientation (optional)
 

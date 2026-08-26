@@ -116,6 +116,10 @@ async function request(path, opts = {}) {
   return res;
 }
 
+// `opts.signal` is honoured by the http front end and cannot be by this one:
+// a request here is a synchronous call into a single-threaded interpreter, and
+// there is nothing running alongside it to notice an abort. app.js stops
+// between stages instead — see the note above `generate`.
 async function workerApi(path, opts = {}) {
   const res = await request(path, opts);
   return {
@@ -143,11 +147,12 @@ async function workerDownload(path) {
 export const api = MODE === 'worker' ? workerApi : httpApi;
 export const download = MODE === 'worker' ? workerDownload : httpDownload;
 
-export async function postJSON(path, body) {
+export async function postJSON(path, body, signal) {
   const res = await api(path, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body ?? {}),
+    signal,
   });
   return res.json();
 }

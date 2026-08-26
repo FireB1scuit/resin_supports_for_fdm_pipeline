@@ -390,26 +390,69 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* The bar under the panel header answers "is it working?" for somebody
-     already looking at the panel. Anyone watching the model is looking at the
-     other side of the window, so the same answer is repeated in the corner of
-     the canvas — opposite the layer chips, out of the way of the model. */
-  #work {
-    position: absolute; right: 12px; top: 12px; z-index: 4;
-    display: flex; align-items: center; gap: 7px;
-    background: rgba(15,17,21,.72); border: 1px solid var(--line);
-    border-radius: 7px; padding: 5px 9px; font-size: 11.5px; color: var(--dim);
-    opacity: 0; transition: opacity .12s; pointer-events: none;
+  /* Nothing in the panel builds anything any more. A dial only marks what is
+     on screen as out of date, and this is the one control that acts on it — so
+     it sits on the canvas rather than at the bottom of a scrolling sidebar,
+     opposite the view chips, and it is sized to be found without looking for
+     it. It is the only button in the app outside the panel, which is most of
+     what makes it obvious.
+
+     It is also where the wait is shown. A spinner floating in the corner on
+     its own said "something is happening" and nothing else; on the button it
+     says which button is busy, and it gives the press that stops the run
+     somewhere to land. */
+  #genwrap { position: absolute; right: 12px; top: 12px; z-index: 4; }
+
+  #generate {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    min-width: 148px; max-width: min(320px, 46vw);
+    padding: 10px 16px; font-size: 13.5px; border-radius: 8px;
+    background: rgba(15,17,21,.86); border: 1px solid var(--line-2);
+    color: var(--text); box-shadow: 0 6px 18px rgba(0,0,0,.35);
   }
-  #work.on { opacity: 1; }
-  #work .spinner {
-    width: 12px; height: 12px; border-width: 1.5px;
+  #generate:hover:not(:disabled) { background: rgba(42,48,58,.92); }
+
+  /* Bright while the scaffold on screen no longer answers to the dials. It is
+     the panel's own `.primary` treatment, which is as loud as the chrome is
+     allowed to be without spending a hue on it — and the dot is the drift dot
+     from the panel headings, saying the same thing in the one place you have
+     to look to do something about it. */
+  #generate.stale {
+    background: var(--text); border-color: var(--text); color: #14161a;
+    font-weight: 600;
   }
-  #worktext { white-space: nowrap; }
-  /* Narrow enough and the label would crowd the model — the spinner alone
-     still says the thing. */
+  #generate.stale:hover:not(:disabled) { filter: brightness(1.08); }
+  #generate .dot {
+    display: none; flex: none; width: 6px; height: 6px;
+    border-radius: 50%; background: currentColor;
+  }
+  #generate.stale .dot { display: block; }
+
+  #generate .spinner { display: none; flex: none; width: 15px; height: 15px; border-width: 2px; }
+  #generate.running .spinner { display: block; }
+
+  /* Running, the label is the name of the stage rather than the word on the
+     button, and stage names are several words long — it may take the room it
+     needs and then stop, so a long one cannot push the button off the canvas. */
+  #genlabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* Same bubble as the todo list and the dial help: out of the flow, never over
+     the thing it describes. It is the only place the button explains that a
+     second press is what stops a run. */
+  #gentip {
+    position: absolute; right: 0; top: calc(100% + 6px); width: max-content;
+    max-width: min(250px, calc(100vw - 24px));
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+    padding: 7px 10px; font-size: 11.5px; line-height: 1.45; color: var(--text);
+    box-shadow: 0 10px 28px rgba(0,0,0,.5);
+    pointer-events: none; opacity: 0; visibility: hidden; transition: opacity .1s;
+  }
+  #genwrap:hover #gentip, #genwrap:focus-within #gentip { opacity: 1; visibility: visible; }
+
+  /* On a narrow window the button stops holding itself open — the label is
+     still the whole message, and the chips opposite need the room. */
   @media (max-width: 560px) {
-    #worktext { display: none; }
+    #generate { min-width: 0; padding: 9px 12px; }
   }
 </style>
 </head>
@@ -427,7 +470,6 @@
     <div id="todolist" role="tooltip">
       <h3>still on the list</h3>
       <ul>
-        <li>manual generate button instead of on-change</li>
         <li>bugfix contact point algorithm not finding small parts.</li>
         <li>multi model support (click on model and rotate it with 3 axis wheels instead of current sliders, wheels must also have a place to type in the rotation value)</li>
         <li>integrate overhang region view (like in lychee) toggle on or off using a button on the top left</li>
@@ -447,7 +489,16 @@
 <div id="stage">
   <canvas id="canvas"></canvas>
 
-  <div id="work"><div class="spinner"></div><span id="worktext">working</span></div>
+  <!-- The only thing in the app that builds a scaffold. Pressed again while it
+       is running, it stops the run — see `generate` in app.js. -->
+  <div id="genwrap">
+    <button id="generate" type="button" aria-describedby="gentip" disabled>
+      <span class="spinner" aria-hidden="true"></span>
+      <span class="dot" aria-hidden="true"></span>
+      <span id="genlabel">generate</span>
+    </button>
+    <div id="gentip" role="tooltip">Generate the supports using this button</div>
+  </div>
 
   <div id="hud">
     <button class="chip on" data-toggle="model">model</button>

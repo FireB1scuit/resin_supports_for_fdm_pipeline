@@ -17,6 +17,20 @@ const state = {
   volume: null,        // mm^3 enclosed by the scaffold, overlaps counted twice
   history: [],         // point lists before each hand edit — see undo()
   busy: false,
+  //: What the view no longer answers for, worst case, since the last build:
+  //: null when it is current, otherwise a SCOPES name. Every dial writes this
+  //: instead of starting a run — see markStale.
+  stale: null,
+  //: The lift baked into the model mesh on screen, so a run knows whether the
+  //: mesh has to be fetched again. null means "not known", which is the state
+  //: a fresh upload is in: the session floats the model by its own preset's
+  //: lift and the payload does not say what that was.
+  lift: null,
+  //: A preset the select is naming but no stage has been told about yet. The
+  //: dials cannot carry one on their own — half of what a preset sets (the
+  //: nozzle, the clearances, the printable limit) has no slider — so the name
+  //: rides along with the next placement and is spent there.
+  pendingPreset: null,
 };
 
 //: How many hand edits ctrl-Z can walk back. Each entry is a shallow copy of a
@@ -142,36 +156,33 @@ function log(msg, cls = '') {
   const tail = $('logtail');
   tail.textContent = msg;
   tail.className = cls;
-  // While something is running, the badge over the canvas says which stage it
-  // is in rather than a generic "working" — the stage names are already being
-  // written here, and "placing support points" is a more useful thing to be
-  // told than that the app is busy.
-  if (state.busy) setWorking(msg);
+  // While a run is going the generate button says which stage it is in rather
+  // than a generic "working" — the stage names are already being written here,
+  // and "placing support points" is a more useful thing to be told than that
+  // the app is busy. Only a run: an upload or an export leaves the button
+  // alone, because neither is something the button started.
+  if (active) setWorking(msg);
 }
 
-/** The canvas-corner badge's label. The trailing ellipsis the log uses to mean
- *  "in progress" is redundant next to a spinner. */
+/** The generate button's label while it is running. The trailing ellipsis the
+ *  log uses to mean "in progress" is redundant next to a spinner. */
 function setWorking(msg) {
-  $('worktext').textContent = (msg || 'working').replace(/\s*…\s*$/, '');
+  $('genlabel').textContent = (msg || 'working').replace(/\s*…\s*$/, '');
 }
 
 /** Two flavours of wait, because they interrupt differently.
  *
  *  `heavy` washes the canvas out, and is for the times there is nothing on it
  *  worth looking at: the first load, and the Pyodide warm-up. Everything else
- *  — a slider released, a point deleted — is a second or two during which
- *  watching the scaffold change is the entire point, so it gets a bar under
- *  the panel header and leaves the viewport alone. Dimming the stage on every
- *  slider release read as a flicker and hid the answer. */
+ *  — a build, an export — is a wait during which watching the scaffold change
+ *  is the entire point, so it gets a bar under the panel header, a spinner on
+ *  the generate button, and leaves the viewport alone. Dimming the stage on
+ *  every rebuild read as a flicker and hid the answer. */
 function busy(on, heavy = false) {
   state.busy = on;
   $('prog').classList.toggle('on', on);
-  // The badge rides on the canvas, so it is redundant behind the full overlay —
-  // that already has a spinner of its own in the middle of the view.
-  $('work').classList.toggle('on', on && !heavy);
   $('busy').classList.toggle('on', on && heavy);
-  if (on) setWorking($('logtail').textContent);
-  else $('busy').classList.remove('on');
+  paintGenerate();
 }
 
 // ---------------------------------------------------------------- api
@@ -183,8 +194,8 @@ function busy(on, heavy = false) {
 
 // ------------------------------------------------------------ geometry io
 
-async function loadSTL(url, kind) {
-  const buf = await (await api(url)).arrayBuffer();
+async function loadSTL(url, kind, signal) {
+  const buf = await (await api(url, { signal })).arrayBuffer();
   const geom = loader.parse(buf);
   geom.computeVertexNormals();
 
@@ -406,8 +417,27 @@ function bindValueBox(id) {
 VALUE_IDS.concat(ROTATION_IDS).forEach(bindValueBox);
 
 // ---------------------------------------------------------------- pipeline
+//
+// Nothing here starts on its own. A dial only records that what is on screen no
+// longer answers to it — see markStale — and the generate button is the one
+// thing that runs a stage. Dragging six sliders used to cost six rebuilds, five
+// of which nobody wanted to see, and the sixth arrived only after the other
+// five had been waited out.
+
+/** How far back a build has to start. Ordered cheapest first: markStale keeps
+ *  the worst of what has piled up since the last one, so a spacing change on
+ *  top of a hand-deleted point still re-places the points. */
+const SCOPES = ['geometry', 'points'];
+
+function markStale(scope) {
+  if (state.stale === null || SCOPES.indexOf(scope) > SCOPES.indexOf(state.stale)) {
+    state.stale = scope;
+  }
+  paintGenerate();
+}
 
 async function upload(file) {
+  await stopRun();
   busy(true, true);
   try {
     $('log').innerHTML = '';
@@ -417,7 +447,8 @@ async function upload(file) {
     const info = await (await api('/api/model', { method: 'POST', body: fd })).json();
 
     state.sid = info.id;
-    state.points = [];
+    state.lift = null;
+    clearBuild();
     $('filename').textContent = `${info.name} — ${info.summary.faces.toLocaleString()} faces, ` +
       info.summary.size.map(v => v.toFixed(1)).join(' × ') + ' mm';
     if (!info.summary.watertight) log('mesh is not watertight; results may be rough', 'w');
@@ -427,18 +458,47 @@ async function upload(file) {
     showRotationValues();
 
     // The file is taken as posed. It arrives already dropped onto the bed, so
-    // there is nothing to decide — go straight to working out where supports go.
+    // there is nothing to decide.
     await loadSTL(`/api/mesh/${state.sid}/model`, 'model');
     frameModel();
     log('using the pose from the file', 'g');
-
-    await runPoints();
-    await runSupports();
   } catch (err) {
     log(`error: ${err.message}`, 'e');
-  } finally {
     busy(false);
+    return;
   }
+  busy(false);
+
+  // The one build nobody has to ask for. There is nothing on the canvas yet, so
+  // there is nothing for a press to be a decision about — and a tool whose whole
+  // output is visual should not open on an empty stage. Every change after this
+  // one waits for the button.
+  markStale('points');
+  await generate();
+}
+
+/** Drop the scaffold and the contact points, and everything else that was only
+ *  true because of them. They belong to a pose or a model that no longer
+ *  exists, so leaving them up while the next build is asked for would be
+ *  showing the answer to a question nobody is still asking.
+ *
+ *  The download buttons go with them, and that is not tidiness: re-posing the
+ *  model clears the session's supports server-side, so an export taken in this
+ *  window is a model and an empty scaffold, written out without complaint. */
+function clearBuild() {
+  if (supportMesh) {
+    world.remove(supportMesh);
+    supportMesh.geometry.dispose();
+    supportMesh = null;
+  }
+  state.points = [];
+  state.dropped = new Set();
+  state.history = [];
+  state.volume = null;
+  $('resetpoints').disabled = true;
+  $('stats').innerHTML = '&mdash;';
+  ['dl3mf', 'dlstl', 'dlsep'].forEach(id => $(id).disabled = true);
+  rebuildMarkers();
 }
 
 /** Rotation sliders are absolute, always applied from the file's own pose —
@@ -448,17 +508,26 @@ async function runRotate() {
   log('rotating the model …');
   const r = await postJSON(`/api/rotate/${state.sid}`, { rx, ry, rz, overrides: overrides() });
   await loadSTL(`/api/mesh/${state.sid}/model`, 'model');
+  state.lift = +$('lift').value;
   frameModel();
   log(`rotated (${r.elapsed.toFixed(2)}s)`, 'g');
 }
 
+/** Turning the model is not a build, and it does not wait for the button.
+ *
+ *  Posing is done by eye — turn it, look, turn it back — and a rotation slider
+ *  that moves nothing until a second control is pressed cannot be used that way
+ *  at all. So the pose is applied at once and only the scaffold is left out of
+ *  date. What was already built came off the old pose and would now be standing
+ *  through the model rather than under it, so it goes rather than hanging about
+ *  looking like a result. */
 async function rerotate() {
   if (!state.sid || state.busy) return;
   busy(true);
   try {
+    clearBuild();
     await runRotate();
-    await runPoints();
-    await runSupports();
+    markStale('points');
   } catch (err) {
     log(`error: ${err.message}`, 'e');
   } finally {
@@ -489,21 +558,47 @@ function absorbPoints(r) {
   log(`${state.points.length} points (${forced} mandatory) in ${r.elapsed.toFixed(2)}s`, 'g');
 }
 
-async function runPoints() {
+async function runPoints(run) {
   log('placing support points …');
-  absorbPoints(await postJSON(`/api/points/${state.sid}`, { overrides: overrides() }));
+  const body = { overrides: overrides() };
+  // A preset is a base the dials sit on top of, not a set of dial values: the
+  // nozzle, the clearances and the printable limit come with it and have no
+  // slider anywhere in the panel. Sending the name is the only way stage 2
+  // hears about those.
+  if (state.pendingPreset) body.preset = state.pendingPreset;
+  const r = await postJSON(`/api/points/${state.sid}`, body, run?.ac.signal);
+  halt(run);
+  // Only now is the preset spent. A stopped run has not applied it, so it has
+  // to still be owed to the next one.
+  state.pendingPreset = null;
+  absorbPoints(r);
 }
 
-async function runSupports() {
+/** Stage 2 is what floats the model, so a lift that has moved leaves the mesh
+ *  on screen at the old height — either at the wrong Z outright, or carrying
+ *  the local offset previewLift put on it. It is the largest thing on the wire,
+ *  so it is fetched again only when one of those is actually true. */
+async function refloat(run) {
+  if (state.lift === +$('lift').value && modelMesh && modelMesh.position.z === 0) return;
+  await loadSTL(`/api/mesh/${state.sid}/model`, 'model', run?.ac.signal);
+  state.lift = +$('lift').value;
+}
+
+async function runSupports(run) {
   log('building support geometry …');
   const r = await postJSON(`/api/supports/${state.sid}`, {
     overrides: overrides(),
     points: state.points,
-  });
+  }, run?.ac.signal);
+  halt(run);
   state.params = r.params;
   state.dropped = new Set(r.dropped_points || []);
   syncSliders(r.params);
-  await loadSTL(`/api/mesh/${state.sid}/supports`, 'supports').catch(() => {
+  await loadSTL(`/api/mesh/${state.sid}/supports`, 'supports', run?.ac.signal).catch((err) => {
+    // A model needing no supports at all answers 404 here, which is not news.
+    // A stopped run answers with an abort, which is — it must not be swallowed
+    // into "no supports needed", or stopping would look like an empty result.
+    if (err.name === 'AbortError') throw err;
     log('no supports needed', 'g');
   });
   rebuildMarkers();
@@ -549,37 +644,117 @@ function showStats(r) {
   $('stats').innerHTML = bits.join('<br>');
 }
 
-/** The lift moves the model itself, so the viewer's copy of it is stale too.
- *  Stage 2 re-floats it server-side; all this has to do is fetch it again. */
-async function relift() {
-  if (!state.sid || state.busy) return;
+/** The lift is a translation in Z and nothing else, so the mesh on screen can
+ *  follow the slider without asking anybody — otherwise dragging it would do
+ *  nothing visible at all until the button was pressed, which reads as broken.
+ *  The scaffold deliberately stays put: it no longer reaches the model, which
+ *  is exactly what out of date looks like. The next build fetches the properly
+ *  floated mesh back and the offset goes with it — see refloat. */
+function previewLift() {
+  if (modelMesh && state.lift !== null) modelMesh.position.z = +$('lift').value - state.lift;
+}
+
+// ---------------------------------------------------------------- runs
+//
+// One build at a time, started and stopped by the same button.
+//
+// A run is a token rather than a flag, so the press that stops it and the code
+// that notices are not the same piece of state: `stop` is set by the second
+// press, `ac` aborts whatever request is in flight, and `halt` is where the run
+// actually ends. Both halves are load-bearing. The abort is what makes stopping
+// immediate on the served build; the checks are all there is under Pyodide,
+// where a request is a synchronous call into a single-threaded interpreter and
+// cannot be interrupted at all.
+//
+// Which is why `halt` sits after every result as well as before every stage. A
+// stop pressed during the *last* stage has no next stage to be refused, so
+// without the check after the request the run would finish and show its answer
+// as though nothing had been pressed. A stopped run applies nothing: what was
+// on screen stays there, and the button goes back to saying it is out of date.
+//
+// So stopping the serverless build waits out the stage already running, and the
+// button says `stopping` until it does. That is honest, and no slower than
+// pretending otherwise would be: the worker is busy either way, and freeing the
+// button early would only let a second run queue up behind the first.
+
+class Stopped extends Error {}
+
+let active = null;    // the run in flight, or null
+let running = null;   // its promise, for anyone who has to wait for it to let go
+
+function halt(run) { if (run?.stop) throw new Stopped(); }
+
+/** The button. A press builds; a press while it is building stops the build. */
+function generate() {
+  if (active) return stopRun();
+  if (!state.sid || state.busy) return Promise.resolve();
+
+  // A press with nothing out of date rebuilds the scaffold anyway. It is a
+  // second or two, it is what was asked for, and a button that ignores a press
+  // is indistinguishable from a broken one.
+  const scope = state.stale ?? 'geometry';
+  active = { stop: false, ac: new AbortController() };
+  running = runAll(scope, active);
+  return running;
+}
+
+async function runAll(scope, run) {
+  state.stale = null;
   busy(true);
+  setWorking('working');
   try {
-    const mm = +$('lift').value;
-    log(mm > 0 ? `floating the model ${mm.toFixed(1)} mm off the plate …` : 'setting the model down …');
-    await runPoints();
-    await loadSTL(`/api/mesh/${state.sid}/model`, 'model');
-    await runSupports();
+    if (scope !== 'geometry') {
+      await runPoints(run);
+      halt(run);
+      await refloat(run);
+      halt(run);
+    }
+    await runSupports(run);
   } catch (err) {
-    log(`error: ${err.message}`, 'e');
+    // Whatever did not finish leaves the view where it already was: out of
+    // date, and now saying so again.
+    markStale(scope);
+    if (err instanceof Stopped || err.name === 'AbortError') log('stopped', 'w');
+    else log(`error: ${err.message}`, 'e');
   } finally {
+    active = null;
+    running = null;
     busy(false);
   }
 }
 
-/** Re-run only what actually changed. Geometry params are cheap; placement is not. */
-async function rerun(scope) {
-  if (!state.sid || state.busy) return;
-  busy(true);
-  try {
-    if (scope === 'points') await runPoints();
-    await runSupports();
-  } catch (err) {
-    log(`error: ${err.message}`, 'e');
-  } finally {
-    busy(false);
+/** Ask the run in flight to stop, and hand back something to wait on. It is not
+ *  over when this returns — see the note above — so the button goes on saying
+ *  what it is doing until it is. */
+function stopRun() {
+  if (!active) return Promise.resolve();
+  if (!active.stop) {
+    active.stop = true;
+    active.ac.abort();
+    log('stopping …', 'w');
+    setWorking('stopping');
+    paintGenerate();
   }
+  return running ?? Promise.resolve();
 }
+
+const TIP_IDLE = 'Generate the supports using this button';
+const TIP_RUNNING = 'click to stop support generating';
+const TIP_STOPPING = 'stopping — the stage already running has to finish';
+
+/** Everything the button says about itself, in one place: whether it can be
+ *  pressed, whether the view a press would replace is out of date, and which of
+ *  the two things a press would do. */
+function paintGenerate() {
+  const b = $('generate');
+  b.disabled = !state.sid || (state.busy && !active) || !!active?.stop;
+  b.classList.toggle('running', !!active);
+  b.classList.toggle('stale', !active && state.stale !== null);
+  if (!active) $('genlabel').textContent = 'generate';
+  $('gentip').textContent = active ? (active.stop ? TIP_STOPPING : TIP_RUNNING) : TIP_IDLE;
+}
+
+$('generate').addEventListener('click', generate);
 
 // ------------------------------------------------------------------ panel
 
@@ -688,13 +863,13 @@ function pushHistory() {
   $('resetpoints').disabled = false;
 }
 
-async function undo() {
+function undo() {
   if (!state.sid || state.busy || !state.history.length) return;
   state.points = state.history.pop();
   state.dropped = new Set();
   rebuildMarkers();
   log(`undone — ${state.points.length} points`);
-  await rerun('geometry');
+  markStale('geometry');
 }
 
 addEventListener('keydown', (e) => {
@@ -714,7 +889,7 @@ let downAt = null;
 
 renderer.domElement.addEventListener('pointerdown', (e) => { downAt = { x: e.clientX, y: e.clientY }; });
 
-renderer.domElement.addEventListener('pointerup', async (e) => {
+renderer.domElement.addEventListener('pointerup', (e) => {
   // Ignore the pointerup that ends an orbit drag.
   if (!downAt || Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 4) return;
   if (!state.sid || state.busy) return;
@@ -738,7 +913,7 @@ renderer.domElement.addEventListener('pointerup', async (e) => {
     log('added a support');
     state.dropped = new Set();
     rebuildMarkers();
-    await rerun('geometry');
+    markStale('geometry');
     return;
   }
 
@@ -752,7 +927,7 @@ renderer.domElement.addEventListener('pointerup', async (e) => {
       log('deleted a support');
       state.dropped = new Set();
       rebuildMarkers();
-      await rerun('geometry');
+      markStale('geometry');
     }
   }
 });
@@ -766,18 +941,23 @@ document.querySelectorAll('[data-toggle]').forEach(btn => {
   };
 });
 
-// Slider release, not every pixel of drag — each change costs a server round trip.
-['tip', 'shaft'].forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
-['spacing', 'overhang'].forEach(id => $(id).addEventListener('change', () => rerun('points')));
-$('tipstyle').addEventListener('change', () => rerun('geometry'));
-$('braces').addEventListener('change', () => rerun('geometry'));
-['lean', 'parenting'].forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
-['base', 'baseh', 'cone', 'coneh'].forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
-['bracethick', 'bracespan', 'braceangle', 'braceheadroom', 'bracespacing', 'bracestart']
-  .forEach(id => $(id).addEventListener('change', () => rerun('geometry')));
-// The lift moves the model, so the point list has to be placed again on top of
-// rebuilding the scaffold — see relift().
-$('lift').addEventListener('change', relift);
+//
+// What each dial costs the next build. Placement is the expensive stage and
+// almost nothing needs it: only the two dials that decide where a contact goes,
+// and the lift, which moves every contact by moving the model under them.
+//
+// This is a table read by one delegated listener rather than a listener per
+// dial. Twenty-odd `addEventListener` lines had already lost one — the
+// plate-only checkbox had none at all, so ticking it changed nothing until some
+// other dial was touched — and a table cannot go quiet like that: a dial
+// missing from it is a dial that visibly never marks the view out of date.
+//
+const DIAL_SCOPE = {};
+for (const id of ['spacing', 'overhang', 'lift']) DIAL_SCOPE[id] = 'points';
+for (const id of ['tip', 'shaft', 'tipstyle', 'plateonly', 'lean', 'parenting',
+                  'braces', 'bracethick', 'bracespan', 'braceangle',
+                  'braceheadroom', 'bracespacing', 'bracestart',
+                  'base', 'baseh', 'cone', 'coneh']) DIAL_SCOPE[id] = 'geometry';
 //
 // Which dials belong to which fold, so a section can say that its own contents
 // have wandered from the preset. The mapping is here rather than in the markup
@@ -818,43 +998,46 @@ function markDrift() {
   $('revert').disabled = !any;
 }
 
-/** Adopt a preset wholesale: dials first, then the pipeline.
+/** Adopt a preset wholesale: every dial it names, and the name itself.
  *
- *  The dials matter. Stage 2 is told the preset by name, but stage 3 is told
- *  the panel's own values — so leaving the sliders where they were meant a new
- *  preset placed its points and then had its geometry built out of the old
- *  preset's numbers. */
-async function applyPreset(name) {
+ *  Both halves matter. The dials matter because stage 3 is told the panel's own
+ *  values, so leaving the sliders where they were meant a new preset placed its
+ *  points and then had its geometry built out of the old preset's numbers. The
+ *  name matters because half of a preset — the nozzle, the clearances, the
+ *  printable limit — reaches no slider at all, and only stage 2 being told the
+ *  name picks that half up. It rides on state.pendingPreset until it does. */
+function applyPreset(name) {
   const p = state.presets?.[name];
   if (p) {
     state.preset = p;
     syncSliders(p);
   }
-  if (!state.sid || state.busy) { markDrift(); return; }
-  busy(true);
-  try {
-    absorbPoints(await postJSON(`/api/points/${state.sid}`, { preset: name }));
-    await runSupports();
-  } catch (err) { log(`error: ${err.message}`, 'e'); }
-  finally { busy(false); }
+  state.pendingPreset = name;
+  markDrift();
+  if (state.sid) markStale('points');
 }
 
 $('preset').addEventListener('change', () => applyPreset($('preset').value));
 $('revert').onclick = () => applyPreset($('preset').value);
 
 // Anything moved anywhere in the panel can put a section out of step with the
-// preset, so the check rides on the panel rather than on twenty-odd controls.
-$('panel').addEventListener('change', markDrift);
+// preset and put the view out of step with the panel, so both checks ride on
+// the panel rather than on twenty-odd controls. The number boxes write through
+// their slider, so a typed value arrives here as a change on the slider's id,
+// which is what DIAL_SCOPE is keyed by.
+$('panel').addEventListener('change', (e) => {
+  markDrift();
+  if (e.target.id === 'lift') previewLift();
+  const scope = DIAL_SCOPE[e.target.id];
+  if (scope) markStale(scope);
+});
 
-$('resetpoints').onclick = async () => {
-  if (!state.sid || state.busy) return;
-  busy(true);
-  try {
-    log('placing support points again …');
-    await runPoints();
-    await runSupports();
-  } catch (err) { log(`error: ${err.message}`, 'e'); }
-  finally { busy(false); }
+// Not a dial: an instruction, and one whose whole point is to throw the hand
+// edits away. Marking the view out of date and waiting would leave the edits on
+// screen with nothing saying they had been discarded, so this one runs.
+$('resetpoints').onclick = () => {
+  markStale('points');
+  generate();
 };
 
 for (const [id, mode] of [['dl3mf', '3mf'], ['dlstl', 'combined'], ['dlsep', 'separate']]) {

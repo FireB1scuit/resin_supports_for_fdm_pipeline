@@ -252,6 +252,34 @@ If a push to `main` is ever attempted, stop and open a PR instead.
   The struts themselves are still left **open** at their buried ends, so the export is
   not watertight (60 naked edges on the `table` scene). Capping them is now safe — a cap
   sits inside its ball — but it is a deliberate open question, not an oversight.
+- **Nothing in the panel builds anything. The generate button is the only entry
+  point into a stage**, and it is the only control that lives on the canvas rather
+  than in the sidebar. A dial's `change` handler records how far back the next
+  build has to start (`markStale`, scopes `geometry` < `points`) and stops there;
+  `generate` in `app.js` is the one place `runPoints`/`runSupports` are called
+  from. Do not add a listener that re-runs a stage — the six-sliders-six-rebuilds
+  behaviour is what this replaced. Which dial costs what lives in the `DIAL_SCOPE`
+  table, deliberately a table rather than a listener per dial: the per-dial version
+  had quietly lost the `plate_only` checkbox, which had no listener at all and so
+  changed nothing until some other dial was touched.
+  Two things are exempt and both earn it. **Rotation** applies at once, because a
+  pose is chosen by eye and a slider that moves nothing until a second control is
+  pressed cannot be used; it drops the scaffold as it goes, since that one was
+  built for the old pose. **The lift** moves the model mesh locally in Z, which is
+  exactly what the lift is, so the slider is not inert while it waits.
+  A **preset** cannot be carried by the dials alone — the nozzle, the clearances
+  and the printable limit have no slider — so the name rides on
+  `state.pendingPreset` until the next stage-2 call spends it. Dropping that is
+  how a preset silently only half-applies.
+- **A run can be stopped, and the button that starts it is the button that stops
+  it.** The token in `app.js` (`active.stop` + an `AbortController`) is checked
+  between stages *and* aborts the request in flight, and both halves are needed:
+  the abort is what makes stopping immediate over HTTP, and the between-stages
+  check is all there is under Pyodide, where a request is a synchronous call into
+  a single-threaded interpreter and cannot be interrupted. So the serverless build
+  waits out the stage it is in and says `stopping` while it does. Do not "fix"
+  that by resolving early — the worker is busy either way, and letting a second
+  run queue behind the first is worse than the wait.
 - **The UI is served `Cache-Control: no-cache`** (`web.app._RevalidatingStatic`), and
   `/api/supports` reports override keys it does not recognise. Both exist for the same
   failure: `index.html` and `app.js` are separate files and this is a tool people leave
