@@ -301,6 +301,42 @@ def run_points(session: Session, **patch: Any) -> dict:
     }
 
 
+def overhang_faces(session: Session, angle_deg: float | None = None) -> dict:
+    """Which faces of the current pose are overhang, for the viewer's toggle.
+
+    This is a read-only viewer aid, not a build stage: it reflects whatever
+    pose happens to be loaded right now (``session.oriented``) and is
+    recomputed only when the caller asks — it has no scope in the UI's
+    points/geometry staleness table and must never be given one.
+
+    Args:
+        angle_deg: the overhang angle to flag at. Defaults to the session's
+            current ``overhang_angle_deg`` so a caller that does not know
+            better still gets a sensible answer; the viewer passes the live
+            value of its own slider so the overlay answers to whatever angle
+            is dialled in at the moment it is toggled on.
+    """
+    from .. import overhang as overhang_mod
+
+    if session.oriented is None:
+        raise StageError(409, "orient the model first")
+
+    mesh = session.oriented
+    angle = float(angle_deg) if angle_deg is not None else float(session.params.overhang_angle_deg)
+    n_faces = int(len(mesh.faces))
+    if n_faces == 0:
+        return {"faces": [], "total_faces": 0, "angle_deg": angle, "area": 0.0}
+
+    mask = overhang_mod.overhang_mask(mesh, angle)
+    area = float(np.asarray(mesh.area_faces, dtype=np.float64)[mask].sum())
+    return {
+        "faces": np.nonzero(mask)[0].tolist(),
+        "total_faces": n_faces,
+        "angle_deg": angle,
+        "area": area,
+    }
+
+
 def run_supports(session: Session, points: list[dict] | None = None, **patch: Any) -> dict:
     from .. import supports as supports_mod
 
