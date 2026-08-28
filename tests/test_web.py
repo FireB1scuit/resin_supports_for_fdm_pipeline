@@ -6,7 +6,6 @@ pipeline behind them is being tuned.
 """
 
 import io
-import zipfile
 
 import pytest
 import trimesh
@@ -184,19 +183,37 @@ def test_export_produces_exactly_one_format_never_both(client, stl_bytes):
     assert client.get(f"/api/export/{sid}", params={"fmt": "both"}).status_code == 400
 
 
-def test_export_separate_writes_a_model_and_a_supports_file(client, stl_bytes):
+def test_export_defaults_to_stl(client, stl_bytes):
+    """STL, not 3MF, is the default format — issue #24."""
     sid = _build(client, stl_bytes, "widget.stl")
 
-    res = client.get(f"/api/export/{sid}", params={"fmt": "stl", "separate": "true"})
+    res = client.get(f"/api/export/{sid}")
     assert res.status_code == 200
-    assert res.headers["content-disposition"].endswith('.zip"')
-
-    with zipfile.ZipFile(io.BytesIO(res.content)) as z:
-        names = sorted(z.namelist())
-    assert names == [
-        "widget_resin-fdm-supported_by-FireB1scuit_model.stl",
-        "widget_resin-fdm-supported_by-FireB1scuit_supports.stl",
+    assert 'filename="widget_resin-fdm-supported_by-FireB1scuit.stl"' in res.headers[
+        "content-disposition"
     ]
+
+
+def test_export_separate_writes_a_model_and_a_supports_file(client, stl_bytes):
+    """Two plain files, fetched one at a time by `part` — not a zip."""
+    sid = _build(client, stl_bytes, "widget.stl")
+
+    model = client.get(f"/api/export/{sid}", params={"fmt": "stl", "separate": "true", "part": "model"})
+    assert model.status_code == 200
+    assert model.content[:2] != b"PK", "a plain STL, not a zip"
+    assert 'filename="widget_resin-fdm-supported_by-FireB1scuit_model.stl"' in model.headers[
+        "content-disposition"
+    ]
+
+    supports = client.get(
+        f"/api/export/{sid}", params={"fmt": "stl", "separate": "true", "part": "supports"}
+    )
+    assert supports.status_code == 200
+    assert 'filename="widget_resin-fdm-supported_by-FireB1scuit_supports.stl"' in supports.headers[
+        "content-disposition"
+    ]
+
+    assert client.get(f"/api/export/{sid}", params={"fmt": "stl", "separate": "true"}).status_code == 400
 
 
 def test_separate_export_marks_only_the_model_file_with_the_plate_cube(client, stl_bytes):
@@ -212,10 +229,12 @@ def test_separate_export_marks_only_the_model_file_with_the_plate_cube(client, s
     )
     expected_cube = export_mod.plate_marker_cube(oriented)
 
-    res = client.get(f"/api/export/{sid}", params={"fmt": "stl", "separate": "true"})
-    with zipfile.ZipFile(io.BytesIO(res.content)) as z:
-        model_bytes = z.read(next(n for n in z.namelist() if n.endswith("_model.stl")))
-        sup_bytes = z.read(next(n for n in z.namelist() if n.endswith("_supports.stl")))
+    model_bytes = client.get(
+        f"/api/export/{sid}", params={"fmt": "stl", "separate": "true", "part": "model"}
+    ).content
+    sup_bytes = client.get(
+        f"/api/export/{sid}", params={"fmt": "stl", "separate": "true", "part": "supports"}
+    ).content
 
     model_mesh = trimesh.load(io.BytesIO(model_bytes), file_type="stl")
     sup_mesh = trimesh.load(io.BytesIO(sup_bytes), file_type="stl")

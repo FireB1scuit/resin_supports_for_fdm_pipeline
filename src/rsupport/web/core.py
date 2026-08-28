@@ -26,7 +26,6 @@ import io
 import threading
 import time
 import uuid
-import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -398,19 +397,25 @@ def export_stem(session: Session) -> str:
     return f"{stem}_resin-fdm-supported_by-FireB1scuit"
 
 
-def export_bytes(session: Session, fmt: str = "3mf", separate: bool = False) -> tuple[str, bytes]:
+def export_bytes(
+    session: Session, fmt: str = "stl", separate: bool = False, part: str | None = None
+) -> tuple[str, bytes]:
     """The finished thing, as ``(filename, payload)``.
 
     Bytes rather than a path, because one caller streams a file off disk and the
     other hands the array to the page to save. ``fmt`` is the file type — "stl"
-    or "3mf", never both, per issue #24 — and ``separate`` picks combined vs.
-    two-file output within that format. Two files come back zipped rather than
-    by picking one.
+    (the default) or "3mf", never both, per issue #24 — and ``separate`` picks
+    combined vs. two-file output within that format. Two files come back one at
+    a time rather than zipped: ``part`` ("model" or "supports") picks which,
+    since a slicer wants two plain files, not an archive it has to unpack
+    first, and a browser download is one file per call anyway.
     """
     if session.oriented is None:
         raise StageError(409, "nothing to export yet")
     if fmt not in ("stl", "3mf"):
         raise StageError(400, f"unknown export format {fmt!r} — must be 'stl' or '3mf'")
+    if separate and part not in ("model", "supports"):
+        raise StageError(400, "separate export needs part='model' or part='supports'")
 
     import tempfile
 
@@ -430,11 +435,10 @@ def export_bytes(session: Session, fmt: str = "3mf", separate: bool = False) -> 
         # see `export_mod.plate_marker_cube`.
         marker_cube=separate,
     )
-    path = written[0]
-    if mode == "separate":
-        zip_path = out_dir / f"{stem}.zip"
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-            for p in written:
-                z.write(p, p.name)
-        path = zip_path
+    if mode == "separate" and part == "supports":
+        if len(written) < 2:
+            raise StageError(404, "no supports to export")
+        path = written[1]
+    else:
+        path = written[0]
     return path.name, path.read_bytes()

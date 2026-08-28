@@ -1054,13 +1054,23 @@ $('resetpoints').onclick = () => {
 
 $('download').onclick = async () => {
   if (!state.sid) return;
-  const fmt = $('fmtstl').checked ? 'stl' : '3mf';
+  const fmt = $('fmt3mf').checked ? '3mf' : 'stl';
   const separate = $('dlsep').checked;
   // Serverless there is nothing to navigate to: the file is assembled in the
   // tab and handed over as a blob. `download` hides which of the two it is.
   try {
     busy(true);
-    await download(`/api/export/${state.sid}?fmt=${fmt}&separate=${separate}`);
+    if (separate) {
+      // Two plain files, not a zip — a browser can balk at saving two files
+      // from one click at once, so the model download always finishes before
+      // the supports one starts.
+      await download(`/api/export/${state.sid}?fmt=${fmt}&separate=true&part=model`);
+      try {
+        await download(`/api/export/${state.sid}?fmt=${fmt}&separate=true&part=supports`);
+      } catch (err) { log(`no supports to export yet: ${err.message}`, 'w'); }
+    } else {
+      await download(`/api/export/${state.sid}?fmt=${fmt}&separate=false`);
+    }
   } catch (err) { log(`export failed: ${err.message}`, 'e'); }
   finally { busy(false); }
 };

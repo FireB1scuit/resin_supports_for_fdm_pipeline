@@ -71,10 +71,14 @@ def test_the_pipeline_runs_end_to_end_with_no_server(router, stl_bytes):
     mesh = router.route("GET", f"/api/mesh/{sid}/supports")
     assert mesh.ok and mesh.body[:5] not in (b"", None)
 
-    out = router.route("GET", f"/api/export/{sid}?fmt=3mf")
+    out = router.route("GET", f"/api/export/{sid}")
     assert out.ok
-    assert out.filename.endswith(".3mf")
-    assert out.body[:2] == b"PK", "a 3MF is a zip"
+    assert out.filename.endswith(".stl"), "stl is the default format"
+
+    threemf = router.route("GET", f"/api/export/{sid}?fmt=3mf")
+    assert threemf.ok
+    assert threemf.filename.endswith(".3mf")
+    assert threemf.body[:2] == b"PK", "a 3MF is a zip"
 
 
 def test_a_summary_matches_the_served_one(client, router, stl_bytes):
@@ -122,12 +126,14 @@ def test_export_filename_and_format_agree_with_the_served_app(client, router, st
     router.route("POST", f"/api/points/{local_sid}", body={})
     router.route("POST", f"/api/supports/{local_sid}", body={})
 
-    served = client.get(f"/api/export/{served_sid}", params={"fmt": "stl", "separate": "true"})
+    served = client.get(
+        f"/api/export/{served_sid}", params={"fmt": "stl", "separate": "true", "part": "model"}
+    )
     served_name = served.headers["content-disposition"].split('filename="')[1].rstrip('"')
 
-    local = router.route("GET", f"/api/export/{local_sid}?fmt=stl&separate=true")
+    local = router.route("GET", f"/api/export/{local_sid}?fmt=stl&separate=true&part=model")
     assert local.ok
-    assert local.filename == served_name == "widget_resin-fdm-supported_by-FireB1scuit.zip"
+    assert local.filename == served_name == "widget_resin-fdm-supported_by-FireB1scuit_model.stl"
 
     served_combined = client.get(f"/api/export/{served_sid}", params={"fmt": "3mf"})
     local_combined = router.route("GET", f"/api/export/{local_sid}?fmt=3mf")
