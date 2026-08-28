@@ -73,6 +73,15 @@ OVERSAMPLE = 20
 MIN_CANDIDATES = 512
 MAX_CANDIDATES = 60_000
 
+# The main draw below picks `count` points with probability proportional to
+# face area, so a real overhang region that is small next to the model's
+# total overhang area can land zero of them purely by chance - the model has
+# plenty of overhang elsewhere, this one patch just loses the lottery. Any
+# connected component of the overhang mask whose *expected* share of the
+# draw is below this gets its own dedicated top-up (see
+# `_guarantee_component_coverage`), so a small part is never left to the odds.
+GUARANTEE_MIN_SAMPLES = 4
+
 # Weight of the detail metric when ordering candidates. 0 ignores detail; 1
 # makes it as important as the overhang severity itself.
 DETAIL_PRIORITY_WEIGHT = 0.5
@@ -189,6 +198,76 @@ def _radii(severity: np.ndarray, params: SupportParams) -> np.ndarray:
 # ------------------------------------------------------------------ sampling
 
 
+def _guarantee_component_coverage(
+    mesh,
+    mask: np.ndarray,
+    areas: np.ndarray,
+    count: int,
+    total: float,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Extra candidates for overhang regions the main draw is likely to miss.
+
+    `sample_overhang_candidates` draws `count` points across the whole
+    overhang mask weighted by face area - correct for density, but a small
+    isolated region (a fingertip, a strap buckle) can go decades of draws
+    without a single hit when it sits next to a model's much larger dominant
+    overhang. This finds each connected component of the mask (via face
+    adjacency restricted to masked faces, same idea as an island but for
+    surface overhang rather than a mid-air cross-section) and, for any
+    component whose expected share of `count` falls under
+    `GUARANTEE_MIN_SAMPLES`, draws that many points from it directly - on top
+    of, not instead of, the main draw.
+
+    Cheap in the common case: real overhang regions are large contiguous
+    surfaces (an arm's underside, a cloak's hem), so most models have only a
+    handful of components and none need a top-up. It only gets busy on a
+    surface whose overhang mask is itself fragmented into many small pieces,
+    which is exactly the case this exists to cover.
+
+    Returns:
+        ``(points (K,3), face_index (K,))``, K possibly 0.
+    """
+    empty = np.zeros((0, 3)), np.zeros(0, dtype=np.intp)
+    idx = np.nonzero(mask)[0]
+    if len(idx) == 0 or total <= 0:
+        return empty
+
+    adjacency = np.asarray(mesh.face_adjacency, dtype=np.intp)
+    if len(adjacency):
+        both = mask[adjacency[:, 0]] & mask[adjacency[:, 1]]
+        edges = adjacency[both]
+    else:
+        edges = np.zeros((0, 2), dtype=np.intp)
+    groups = trimesh.graph.connected_components(edges, nodes=idx, min_len=1)
+
+    n_faces = len(mesh.faces)
+    extra_pts: list[np.ndarray] = []
+    extra_faces: list[np.ndarray] = []
+    for gi, group in enumerate(groups):
+        group = np.asarray(group, dtype=np.intp)
+        comp_area = float(areas[group].sum())
+        expected = count * comp_area / total
+        if expected >= GUARANTEE_MIN_SAMPLES:
+            continue
+        comp_weight = np.zeros(n_faces, dtype=np.float64)
+        comp_weight[group] = areas[group]
+        pts, faces = trimesh.sample.sample_surface(
+            mesh,
+            GUARANTEE_MIN_SAMPLES,
+            face_weight=comp_weight,
+            # Derived, not reused: a shared seed would draw the exact same
+            # relative barycentric offsets in every component.
+            seed=(seed * 2_654_435_761 + gi + 1) & 0x7FFFFFFF,
+        )
+        extra_pts.append(np.asarray(pts, dtype=np.float64))
+        extra_faces.append(np.asarray(faces, dtype=np.intp))
+
+    if not extra_pts:
+        return empty
+    return np.vstack(extra_pts), np.concatenate(extra_faces)
+
+
 def sample_overhang_candidates(
     mesh,
     params: SupportParams,
@@ -241,6 +320,13 @@ def sample_overhang_candidates(
     )
     points = np.asarray(points, dtype=np.float64)
     faces = np.asarray(faces, dtype=np.intp)
+
+    extra_points, extra_faces = _guarantee_component_coverage(
+        mesh, mask, areas, count, total, seed
+    )
+    if len(extra_points):
+        points = np.vstack([points, extra_points])
+        faces = np.concatenate([faces, extra_faces])
 
     if filter_supportable:
         ok = _supportable(points, mesh, params, ray if ray is not None else DownRay(mesh))
