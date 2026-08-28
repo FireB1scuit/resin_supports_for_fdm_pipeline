@@ -164,6 +164,11 @@ def api_workspace_get(wid: str) -> dict:
     return core.workspace_payload(_get_workspace(wid), _store)
 
 
+@app.get("/api/overhang/{sid}")
+def api_overhang(sid: str, angle_deg: float | None = None) -> dict:
+    return _staged(core.overhang_faces, _get(sid), angle_deg)
+
+
 @app.get("/api/mesh/{sid}/{which}")
 def api_mesh(sid: str, which: str) -> Response:
     data = _staged(core.mesh_stl, _get(sid), which)

@@ -59,6 +59,7 @@ class ModelEntry {
     world.add(this.group);
     this.modelMesh = null;
     this.supportMesh = null;
+    this.overhangMesh = null;   // the checkered overlay — see loadOverhang/buildOverhangOverlay
     this.markers = [];   // one InstancedMesh per flavour; .userData.at maps back to points
 
     this.points = [];
@@ -194,7 +195,7 @@ const MAT = {
   pointDropped: new THREE.MeshBasicMaterial({ color: 0xff3b30 }),
 };
 
-const show = { model: true, supports: true, points: false, wire: false };
+const show = { model: true, supports: true, points: false, wire: false, overhang: false };
 
 function resize() {
   const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -274,12 +275,21 @@ async function loadSTL(m, url, kind, signal) {
   if (kind === 'model') {
     if (m.modelMesh) { m.group.remove(m.modelMesh); m.modelMesh.geometry.dispose(); }
     m.modelMesh = mesh;
+    // The overlay is built from this geometry's own vertex positions (see
+    // buildOverhangOverlay), so a new model mesh strands the old one — face
+    // indices from the previous pose mean nothing against this one.
+    clearOverhangOverlay(m);
   } else {
     if (m.supportMesh) { m.group.remove(m.supportMesh); m.supportMesh.geometry.dispose(); }
     m.supportMesh = mesh;
   }
   m.group.add(mesh);
   applyVisibility();
+  // The overlay is not a build stage and has no scope of its own — it just
+  // has to survive the model mesh being replaced out from under it, so it is
+  // refetched here rather than left stale until somebody happens to retoggle
+  // it.
+  if (kind === 'model' && show.overhang) await loadOverhang(signal);
   return mesh;
 }
 
@@ -369,9 +379,116 @@ function applyVisibility() {
       m.modelMesh.material = isActive ? MAT.model : MAT.modelInactive;
     }
     if (m.supportMesh) m.supportMesh.visible = isActive && show.supports;
+    if (m.overhangMesh) m.overhangMesh.visible = isActive && show.overhang;
     m.markers.forEach(mk => { mk.visible = isActive && show.points; });
   }
   MAT.model.wireframe = show.wire;
+}
+
+// ------------------------------------------------------------- overhang view
+//
+// A read-only viewer aid, not a build stage: `rsupport.web.core.overhang_faces`
+// just answers "which faces of the pose on screen right now are overhang", and
+// nothing here touches DIAL_SCOPE or markStale. It is recomputed when the
+// toggle is switched on and whenever the model mesh it was drawn against is
+// replaced (a rotation, a lift change, a fresh upload) — never on a dial
+// change, which is what would wire it into the staleness machinery this is
+// deliberately kept out of.
+
+/** mm per checker cell. A fixed viewer constant, not a support dimension —
+ *  CLAUDE.md's "derive every millimetre from nozzle_diameter" rule is about
+ *  geometry the generator builds, and this overlay builds nothing. */
+const OVERHANG_CHECK_MM = 0.25;
+const OVERHANG_YELLOW = [0.95, 0.78, 0.05];
+const OVERHANG_BLACK = [0.04, 0.04, 0.04];
+
+function clearOverhangOverlay(m) {
+  if (!m || !m.overhangMesh) return;
+  m.group.remove(m.overhangMesh);
+  m.overhangMesh.geometry.dispose();
+  m.overhangMesh.material.dispose();
+  m.overhangMesh = null;
+}
+
+/** A hazard checker in the model's own object space (so it moves with that
+ *  model's group like modelMesh and supportMesh do): each triangle is
+ *  coloured solid (all three of its own vertices, not shared with any
+ *  neighbour) by the parity of its centroid's cell on a 3D grid. Summing all
+ *  three axes rather than just XY keeps the pattern reading as a checker on a
+ *  steep or vertical face too, not a set of stripes running the wrong way. */
+function buildOverhangOverlay(m, faceIndices) {
+  clearOverhangOverlay(m);
+  if (!m || !m.modelMesh || !faceIndices || !faceIndices.length) { applyVisibility(); return; }
+
+  const src = m.modelMesh.geometry.attributes.position;
+  const positions = new Float32Array(faceIndices.length * 9);
+  const colors = new Float32Array(faceIndices.length * 9);
+
+  for (let i = 0; i < faceIndices.length; i++) {
+    const f = faceIndices[i];
+    let cx = 0, cy = 0, cz = 0;
+    for (let v = 0; v < 3; v++) {
+      const si = f * 3 + v, di = (i * 3 + v) * 3;
+      const x = src.getX(si), y = src.getY(si), z = src.getZ(si);
+      positions[di] = x; positions[di + 1] = y; positions[di + 2] = z;
+      cx += x; cy += y; cz += z;
+    }
+    const cell = Math.floor(cx / 3 / OVERHANG_CHECK_MM)
+               + Math.floor(cy / 3 / OVERHANG_CHECK_MM)
+               + Math.floor(cz / 3 / OVERHANG_CHECK_MM);
+    const c = (cell & 1) ? OVERHANG_YELLOW : OVERHANG_BLACK;
+    for (let v = 0; v < 3; v++) {
+      const di = (i * 3 + v) * 3;
+      colors[di] = c[0]; colors[di + 1] = c[1]; colors[di + 2] = c[2];
+    }
+  }
+
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geom.computeVertexNormals();
+  const mat = new THREE.MeshBasicMaterial({
+    vertexColors: true, side: THREE.DoubleSide,
+    // Coplanar with the model surface it is drawn over, so without this the
+    // two fight for the same pixels and flicker between them.
+    polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
+  });
+  m.overhangMesh = new THREE.Mesh(geom, mat);
+  m.overhangMesh.position.copy(m.modelMesh.position);
+  m.group.add(m.overhangMesh);
+  applyVisibility();
+}
+
+/** Fetch the overhang faces for the active model's pose on screen and rebuild
+ *  its overlay from them. Not part of any run: it is its own request, made
+ *  only when the toggle asks for one, or when the active model switches
+ *  while the toggle is already on. */
+async function loadOverhang(signal) {
+  const m = active();
+  if (!m || !m.modelMesh) return;
+  try {
+    const angle = +$('overhang').value;
+    const r = await (await api(`/api/overhang/${m.sid}?angle_deg=${angle}`, { signal })).json();
+    buildOverhangOverlay(m, r.faces);
+  } catch (err) {
+    if (err.name === 'AbortError') throw err;
+    log(`could not draw the overhang overlay: ${err.message}`, 'e');
+    show.overhang = false;
+    document.querySelector('[data-toggle="overhang"]')?.classList.remove('on');
+    applyVisibility();
+  }
+}
+
+/** The overhang chip's own click handler — everything else on `[data-toggle]`
+ *  just flips a visibility flag, but this one has to fetch the first time it
+ *  is switched on. */
+async function toggleOverhang(btn) {
+  const m = active();
+  if (!m || state.busy) return;
+  show.overhang = !show.overhang;
+  btn.classList.toggle('on', show.overhang);
+  if (show.overhang && !m.overhangMesh) await loadOverhang();
+  else applyVisibility();
 }
 
 // ---------------------------------------------------------------- params
@@ -684,6 +801,10 @@ async function switchModel(sid) {
   markDrift();
   frameModel(m);
   applyVisibility();
+  // The overlay is per-model and built lazily, so a model that has never had
+  // it toggled on while active doesn't have one yet even though the toggle
+  // itself is still showing "on" from whichever model set it there.
+  if (show.overhang && !m.overhangMesh) await loadOverhang();
   rebuildMarkers(m);
   $('resetpoints').disabled = !m.history.length;
   if (m.lastBuild) showStats(m, m.lastBuild); else $('stats').innerHTML = '&mdash;';
@@ -949,7 +1070,13 @@ function showStats(m, r) {
  *  floated mesh back and the offset goes with it — see refloat. */
 function previewLift() {
   const m = active();
-  if (m?.modelMesh && m.lift !== null) m.modelMesh.position.z = +$('lift').value - m.lift;
+  if (m?.modelMesh && m.lift !== null) {
+    m.modelMesh.position.z = +$('lift').value - m.lift;
+    // The overlay is drawn in the model's own object space and has no lift
+    // logic of its own — it just has to ride along, or it visibly separates
+    // from the surface it is supposed to be painted on.
+    if (m.overhangMesh) m.overhangMesh.position.z = m.modelMesh.position.z;
+  }
 }
 
 // ---------------------------------------------------------------- runs
@@ -1257,8 +1384,11 @@ renderer.domElement.addEventListener('pointerup', (e) => {
 });
 
 document.querySelectorAll('[data-toggle]').forEach(btn => {
+  const k = btn.dataset.toggle;
+  // Every other chip is a bare visibility flag; this one has to fetch data
+  // the first time it is switched on, so it keeps its own handler above.
+  if (k === 'overhang') { btn.onclick = () => toggleOverhang(btn); return; }
   btn.onclick = () => {
-    const k = btn.dataset.toggle;
     show[k] = !show[k];
     btn.classList.toggle('on', show[k]);
     applyVisibility();
