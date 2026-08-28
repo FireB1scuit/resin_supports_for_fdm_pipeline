@@ -71,7 +71,7 @@ def test_the_pipeline_runs_end_to_end_with_no_server(router, stl_bytes):
     mesh = router.route("GET", f"/api/mesh/{sid}/supports")
     assert mesh.ok and mesh.body[:5] not in (b"", None)
 
-    out = router.route("GET", f"/api/export/{sid}?mode=3mf")
+    out = router.route("GET", f"/api/export/{sid}?fmt=3mf")
     assert out.ok
     assert out.filename.endswith(".3mf")
     assert out.body[:2] == b"PK", "a 3MF is a zip"
@@ -107,6 +107,33 @@ def test_garbage_upload_is_a_status_not_an_exception(router):
 
 def test_unknown_session_is_404(router):
     assert router.route("POST", "/api/points/nope", body={}).status == 404
+
+
+def test_export_filename_and_format_agree_with_the_served_app(client, router, stl_bytes):
+    """Issue #24's naming and format-checkbox rework has to land in both front
+    ends identically, or `app.js` behaves differently depending on transport."""
+    served_sid = client.post(
+        "/api/model", files={"file": ("widget.stl", stl_bytes, "model/stl")}
+    ).json()["id"]
+    client.post(f"/api/points/{served_sid}", json={})
+    client.post(f"/api/supports/{served_sid}", json={})
+
+    local_sid = _upload(router, stl_bytes, name="widget.stl")
+    router.route("POST", f"/api/points/{local_sid}", body={})
+    router.route("POST", f"/api/supports/{local_sid}", body={})
+
+    served = client.get(f"/api/export/{served_sid}", params={"fmt": "stl", "separate": "true"})
+    served_name = served.headers["content-disposition"].split('filename="')[1].rstrip('"')
+
+    local = router.route("GET", f"/api/export/{local_sid}?fmt=stl&separate=true")
+    assert local.ok
+    assert local.filename == served_name == "widget_resin-fdm-supported_by-FireB1scuit.zip"
+
+    served_combined = client.get(f"/api/export/{served_sid}", params={"fmt": "3mf"})
+    local_combined = router.route("GET", f"/api/export/{local_sid}?fmt=3mf")
+    served_name = served_combined.headers["content-disposition"].split('filename="')[1].rstrip('"')
+    assert local_combined.filename == served_name
+    assert local_combined.filename == "widget_resin-fdm-supported_by-FireB1scuit.3mf"
     assert router.route("GET", "/api/mesh/nope/model").status == 404
 
 

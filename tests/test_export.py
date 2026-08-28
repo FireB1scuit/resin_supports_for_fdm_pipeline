@@ -66,6 +66,62 @@ def test_export_dispatches_on_extension(parts, tmp_path):
     assert export.export(model, sup, tmp_path / "e.stl", params)[0].suffix == ".stl"
 
 
+def test_plate_marker_cube_sits_on_the_plate_at_the_models_low_corner(parts):
+    model, _ = parts
+    cube = export.plate_marker_cube(model)
+
+    assert cube.extents == pytest.approx([export.MARKER_CUBE_SIZE] * 3)
+    lo, hi = cube.bounds
+    model_lo, _ = model.bounds
+    assert lo[2] == pytest.approx(0.0)
+    assert hi[2] == pytest.approx(export.MARKER_CUBE_SIZE)
+    assert lo[0] == pytest.approx(model_lo[0])
+    assert lo[1] == pytest.approx(model_lo[1])
+
+
+def test_plate_marker_cube_follows_a_rotated_models_own_corner(parts):
+    """Placed off the model's own bounding box rather than a fixed coordinate,
+    so a model that arrived rotated still gets a marker at its actual corner."""
+    model, _ = parts
+    rotated = model.copy()
+    rotated.apply_transform(
+        trimesh.transformations.euler_matrix(0.4, 0.9, 1.7, axes="sxyz")
+    )
+    rotated.apply_translation([0, 0, -rotated.bounds[0][2]])  # back onto the plate
+
+    cube = export.plate_marker_cube(rotated)
+    lo, _ = cube.bounds
+    model_lo, _ = rotated.bounds
+    assert lo[0] == pytest.approx(model_lo[0])
+    assert lo[1] == pytest.approx(model_lo[1])
+
+
+def test_separate_export_adds_the_marker_cube_to_the_model_file_only(parts, tmp_path):
+    model, sup = parts
+    written = export.export_separate(model, sup, tmp_path / "g.stl", marker_cube=True)
+    model_out, sup_out = (trimesh.load(p, force="mesh") for p in written)
+
+    assert len(model_out.faces) == len(model.faces) + 12  # + one box-shaped cube
+    assert len(sup_out.faces) == len(sup.faces)
+
+
+def test_separate_export_without_the_flag_adds_no_cube(parts, tmp_path):
+    model, sup = parts
+    written = export.export_separate(model, sup, tmp_path / "h.stl")
+    model_out = trimesh.load(written[0], force="mesh")
+    assert len(model_out.faces) == len(model.faces)
+
+
+def test_export_dispatch_threads_the_marker_cube_through_separate_mode(parts, tmp_path):
+    model, sup = parts
+    params = presets.get("mini_0.2")
+    written = export.export(
+        model, sup, tmp_path / "i.stl", params, mode="separate", marker_cube=True
+    )
+    model_out = trimesh.load(written[0], force="mesh")
+    assert len(model_out.faces) == len(model.faces) + 12
+
+
 def test_export_handles_empty_supports(parts, tmp_path):
     """A model that needs no supports must still export cleanly."""
     model, _ = parts

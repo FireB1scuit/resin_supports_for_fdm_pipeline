@@ -509,7 +509,7 @@ function clearBuild() {
   state.volume = null;
   $('resetpoints').disabled = true;
   $('stats').innerHTML = '&mdash;';
-  ['dl3mf', 'dlstl', 'dlsep'].forEach(id => $(id).disabled = true);
+  $('download').disabled = true;
   rebuildMarkers();
 }
 
@@ -620,7 +620,7 @@ async function runSupports(run) {
   (r.warnings || []).slice(0, 5).forEach(w => log(w, 'w'));
   log(`built in ${r.elapsed.toFixed(2)}s`, 'g');
 
-  ['dl3mf', 'dlstl', 'dlsep'].forEach(id => $(id).disabled = false);
+  $('download').disabled = false;
 }
 
 //: g/cm^3. PLA, because that is what an FDM scaffold gets printed in more often
@@ -1052,16 +1052,18 @@ $('resetpoints').onclick = () => {
   generate();
 };
 
-for (const [id, mode] of [['dl3mf', '3mf'], ['dlstl', 'combined'], ['dlsep', 'separate']]) {
-  $(id).onclick = async () => {
-    if (!state.sid) return;
-    // Serverless there is nothing to navigate to: the file is assembled in the
-    // tab and handed over as a blob. `download` hides which of the two it is.
-    try { busy(true); await download(`/api/export/${state.sid}?mode=${mode}`); }
-    catch (err) { log(`export failed: ${err.message}`, 'e'); }
-    finally { busy(false); }
-  };
-}
+$('download').onclick = async () => {
+  if (!state.sid) return;
+  const fmt = $('fmtstl').checked ? 'stl' : '3mf';
+  const separate = $('dlsep').checked;
+  // Serverless there is nothing to navigate to: the file is assembled in the
+  // tab and handed over as a blob. `download` hides which of the two it is.
+  try {
+    busy(true);
+    await download(`/api/export/${state.sid}?fmt=${fmt}&separate=${separate}`);
+  } catch (err) { log(`export failed: ${err.message}`, 'e'); }
+  finally { busy(false); }
+};
 
 // ---------------------------------------------------------------- dropping
 

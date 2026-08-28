@@ -26,9 +26,24 @@ import trimesh
 from .mesh_io import concat, save
 from .types import SupportParams
 
-__all__ = ["export_combined", "export_separate", "export_3mf", "export"]
+__all__ = [
+    "export_combined",
+    "export_separate",
+    "export_3mf",
+    "export",
+    "plate_marker_cube",
+    "MARKER_CUBE_SIZE",
+]
 
 _CORE_NS = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+
+#: A separate-files export ships the model with no supports underneath it, so
+#: a floating model (lift_height > 0, plate at z=0 — see CLAUDE.md) exports
+#: looking exactly like one somebody forgot to hold up. This is a tiny cube
+#: glued to the plate purely as a visual witness of that pose: nothing a
+#: slicer or viewer would read as geometry to print, just evidence the model
+#: was meant to hang in the air.
+MARKER_CUBE_SIZE = 0.1
 
 
 def export(
@@ -37,8 +52,14 @@ def export(
     path: str | Path,
     params: SupportParams,
     mode: str = "auto",
+    marker_cube: bool = False,
 ) -> list[Path]:
-    """Dispatch on `mode`, or on the file extension when mode is "auto"."""
+    """Dispatch on `mode`, or on the file extension when mode is "auto".
+
+    `marker_cube` only ever affects the `separate` mode — a combined or 3MF
+    export still carries the real supports as the model's anchor and context,
+    so there is nothing there for the marker to stand in for.
+    """
     path = Path(path)
     if mode == "auto":
         mode = "3mf" if path.suffix.lower() == ".3mf" else "combined"
@@ -46,7 +67,7 @@ def export(
     if mode == "combined":
         return [export_combined(model, supports, path)]
     if mode == "separate":
-        return export_separate(model, supports, path)
+        return export_separate(model, supports, path, marker_cube=marker_cube)
     if mode == "3mf":
         return [export_3mf(model, supports, path, params)]
     raise ValueError(f"unknown export mode {mode!r}")
@@ -58,14 +79,39 @@ def export_combined(
     return save(concat(model, supports), path)
 
 
+def plate_marker_cube(model: trimesh.Trimesh) -> trimesh.Trimesh:
+    """A `MARKER_CUBE_SIZE`^3 mm cube sitting on the plate beside `model`.
+
+    Positioned off the model's own bounding box (the low-XY corner, at
+    z=0..`MARKER_CUBE_SIZE`) rather than any hardcoded coordinate, so it lands
+    correctly whatever the model's rotation or XY placement turned out to be
+    — `model` here is expected to be the already-posed, already-lifted mesh
+    (`Session.oriented`), not the original upload.
+    """
+    lo, _ = model.bounds
+    half = MARKER_CUBE_SIZE / 2.0
+    cube = trimesh.creation.box(extents=[MARKER_CUBE_SIZE] * 3)
+    cube.apply_translation([lo[0] + half, lo[1] + half, half])
+    return cube
+
+
 def export_separate(
-    model: trimesh.Trimesh, supports: trimesh.Trimesh, path: str | Path
+    model: trimesh.Trimesh,
+    supports: trimesh.Trimesh,
+    path: str | Path,
+    marker_cube: bool = False,
 ) -> list[Path]:
-    """Write `<stem>_model.stl` and `<stem>_supports.stl`."""
+    """Write `<stem>_model.stl` and `<stem>_supports.stl`.
+
+    `marker_cube`, when set, adds `plate_marker_cube(model)` to the model file
+    only — never the supports file — since the model is being exported without
+    the very geometry that would otherwise show it is meant to float.
+    """
     path = Path(path)
     suffix = path.suffix or ".stl"
     stem = path.with_suffix("")
-    out = [save(model, stem.with_name(stem.name + "_model").with_suffix(suffix))]
+    model_out = concat(model, plate_marker_cube(model)) if marker_cube else model
+    out = [save(model_out, stem.with_name(stem.name + "_model").with_suffix(suffix))]
     if supports is not None and len(supports.faces):
         out.append(save(supports, stem.with_name(stem.name + "_supports").with_suffix(suffix)))
     return out

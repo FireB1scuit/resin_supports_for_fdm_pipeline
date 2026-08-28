@@ -6,11 +6,13 @@ pipeline behind them is being tuned.
 """
 
 import io
+import zipfile
 
 import pytest
 import trimesh
 from fastapi.testclient import TestClient
 
+from rsupport import export as export_mod
 from rsupport.types import SupportParams
 from rsupport.web.app import app
 
@@ -140,6 +142,118 @@ def test_index_page_is_served(client):
     # The importmap is what lets the vendored addons resolve 'three' with no
     # bundler; if it goes missing the whole viewer silently fails to boot.
     assert 'type="importmap"' in body
+
+
+# --------------------------------------------------------------- export (#24)
+
+
+def _build(client, data, name="widget.stl"):
+    sid = _upload(client, data, name).json()["id"]
+    client.post(f"/api/points/{sid}", json={})
+    client.post(f"/api/supports/{sid}", json={})
+    return sid
+
+
+def test_export_filename_follows_the_original_upload(client, stl_bytes):
+    """{stem}_resin-fdm-supported_by-FireB1scuit.{ext} — issue #24."""
+    sid = _build(client, stl_bytes, "widget.stl")
+
+    res = client.get(f"/api/export/{sid}", params={"fmt": "3mf"})
+    assert res.status_code == 200
+    assert 'filename="widget_resin-fdm-supported_by-FireB1scuit.3mf"' in res.headers[
+        "content-disposition"
+    ]
+
+    res = client.get(f"/api/export/{sid}", params={"fmt": "stl"})
+    assert 'filename="widget_resin-fdm-supported_by-FireB1scuit.stl"' in res.headers[
+        "content-disposition"
+    ]
+
+
+def test_export_produces_exactly_one_format_never_both(client, stl_bytes):
+    """`fmt` is a single stl-vs-3mf choice; there is no "both" mode any more."""
+    sid = _build(client, stl_bytes)
+
+    stl = client.get(f"/api/export/{sid}", params={"fmt": "stl"})
+    assert stl.headers["content-disposition"].endswith('.stl"')
+    assert stl.content[:2] != b"PK", "a plain STL, not a zip and not a 3MF"
+
+    threemf = client.get(f"/api/export/{sid}", params={"fmt": "3mf"})
+    assert threemf.headers["content-disposition"].endswith('.3mf"')
+
+    assert client.get(f"/api/export/{sid}", params={"fmt": "both"}).status_code == 400
+
+
+def test_export_separate_writes_a_model_and_a_supports_file(client, stl_bytes):
+    sid = _build(client, stl_bytes, "widget.stl")
+
+    res = client.get(f"/api/export/{sid}", params={"fmt": "stl", "separate": "true"})
+    assert res.status_code == 200
+    assert res.headers["content-disposition"].endswith('.zip"')
+
+    with zipfile.ZipFile(io.BytesIO(res.content)) as z:
+        names = sorted(z.namelist())
+    assert names == [
+        "widget_resin-fdm-supported_by-FireB1scuit_model.stl",
+        "widget_resin-fdm-supported_by-FireB1scuit_supports.stl",
+    ]
+
+
+def test_separate_export_marks_only_the_model_file_with_the_plate_cube(client, stl_bytes):
+    """The model is exported without the supports that would otherwise anchor
+    it, so it alone gets the 0.1mm marker cube — never the supports file."""
+    sid = _build(client, stl_bytes, "widget.stl")
+
+    oriented = trimesh.load(
+        io.BytesIO(client.get(f"/api/mesh/{sid}/model").content), file_type="stl"
+    )
+    raw_supports = trimesh.load(
+        io.BytesIO(client.get(f"/api/mesh/{sid}/supports").content), file_type="stl"
+    )
+    expected_cube = export_mod.plate_marker_cube(oriented)
+
+    res = client.get(f"/api/export/{sid}", params={"fmt": "stl", "separate": "true"})
+    with zipfile.ZipFile(io.BytesIO(res.content)) as z:
+        model_bytes = z.read(next(n for n in z.namelist() if n.endswith("_model.stl")))
+        sup_bytes = z.read(next(n for n in z.namelist() if n.endswith("_supports.stl")))
+
+    model_mesh = trimesh.load(io.BytesIO(model_bytes), file_type="stl")
+    sup_mesh = trimesh.load(io.BytesIO(sup_bytes), file_type="stl")
+
+    # supports file is untouched — same geometry as fetching it directly.
+    assert len(sup_mesh.faces) == len(raw_supports.faces)
+
+    # model file is the original mesh plus exactly one marker-cube-shaped part.
+    assert len(model_mesh.faces) == len(oriented.faces) + len(expected_cube.faces)
+    parts = model_mesh.split(only_watertight=False)
+    markers = [
+        p
+        for p in parts
+        if len(p.faces) == len(expected_cube.faces)
+        and p.extents == pytest.approx(expected_cube.extents, abs=1e-6)
+    ]
+    assert len(markers) == 1
+    assert markers[0].bounds[0] == pytest.approx(expected_cube.bounds[0], abs=1e-6)
+    assert markers[0].bounds[1] == pytest.approx(expected_cube.bounds[1], abs=1e-6)
+    assert markers[0].bounds[0][2] == pytest.approx(0.0, abs=1e-6), "sits on the plate"
+
+
+def test_combined_and_3mf_exports_carry_no_marker_cube(client, stl_bytes):
+    """Only a separate export drops the supports out of the model file — the
+    combined STL and the two-object 3MF still have them as context/anchor."""
+    sid = _build(client, stl_bytes)
+    oriented = trimesh.load(
+        io.BytesIO(client.get(f"/api/mesh/{sid}/model").content), file_type="stl"
+    )
+    supports = trimesh.load(
+        io.BytesIO(client.get(f"/api/mesh/{sid}/supports").content), file_type="stl"
+    )
+
+    combined = trimesh.load(
+        io.BytesIO(client.get(f"/api/export/{sid}", params={"fmt": "stl"}).content),
+        file_type="stl",
+    )
+    assert len(combined.faces) == len(oriented.faces) + len(supports.faces)
 
 
 def test_the_ui_is_served_with_revalidation_forced(client):
