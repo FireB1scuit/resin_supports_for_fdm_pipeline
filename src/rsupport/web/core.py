@@ -26,7 +26,6 @@ import io
 import threading
 import time
 import uuid
-import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -62,6 +61,9 @@ class Session:
     id: str
     original: trimesh.Trimesh
     params: SupportParams
+    #: The filename the model arrived under, kept only to build the exported
+    #: file's name (see `export_stem`) — never re-parsed for anything else.
+    upload_name: str | None = None
     #: The chosen pose, sitting flat on z=0. `oriented` is this same mesh
     #: floated up by ``params.lift_height`` — kept apart so moving the lift
     #: slider is a translation rather than another orientation search.
@@ -189,7 +191,9 @@ def load_model(data: bytes, filename: str | None = None) -> Session:
     except Exception as exc:
         raise StageError(400, f"could not read {filename!r}: {exc}") from exc
 
-    session = Session(id=uuid.uuid4().hex[:12], original=mesh, params=presets.get())
+    session = Session(
+        id=uuid.uuid4().hex[:12], original=mesh, params=presets.get(), upload_name=filename
+    )
     session.grounded = mesh_io.drop_to_bed(mesh)
     session.oriented = mesh_io.set_lift(session.grounded, session.params.lift_height)
     return session
@@ -416,29 +420,61 @@ def mesh_stl(session: Session, which: str) -> bytes:
     return buf.getvalue()
 
 
-def export_bytes(session: Session, mode: str = "3mf") -> tuple[str, bytes]:
+def export_stem(session: Session) -> str:
+    """The exported file's basename, without an extension.
+
+    Named for the file that was uploaded rather than a generic "supported",
+    and signed, per GitHub issue #24 — so the file a person saves says both
+    what it is and where it came from once it is sitting in a downloads
+    folder next to a dozen others.
+    """
+    name = session.upload_name or "model"
+    stem = Path(name).stem or "model"
+    return f"{stem}_resin-fdm-supported_by-FireB1scuit"
+
+
+def export_bytes(
+    session: Session, fmt: str = "stl", separate: bool = False, part: str | None = None
+) -> tuple[str, bytes]:
     """The finished thing, as ``(filename, payload)``.
 
     Bytes rather than a path, because one caller streams a file off disk and the
-    other hands the array to the page to save. ``separate`` writes two meshes,
-    so it comes back zipped rather than by picking one.
+    other hands the array to the page to save. ``fmt`` is the file type — "stl"
+    (the default) or "3mf", never both, per issue #24 — and ``separate`` picks
+    combined vs. two-file output within that format. Two files come back one at
+    a time rather than zipped: ``part`` ("model" or "supports") picks which,
+    since a slicer wants two plain files, not an archive it has to unpack
+    first, and a browser download is one file per call anyway.
     """
     if session.oriented is None:
         raise StageError(409, "nothing to export yet")
+    if fmt not in ("stl", "3mf"):
+        raise StageError(400, f"unknown export format {fmt!r} — must be 'stl' or '3mf'")
+    if separate and part not in ("model", "supports"):
+        raise StageError(400, "separate export needs part='model' or part='supports'")
 
     import tempfile
 
-    suffix = ".3mf" if mode == "3mf" else ".stl"
+    suffix = ".3mf" if fmt == "3mf" else ".stl"
+    mode = "separate" if separate else ("3mf" if fmt == "3mf" else "combined")
+    stem = export_stem(session)
     out_dir = Path(tempfile.mkdtemp(prefix="rsupport_"))
     supports = session.supports if session.supports is not None else trimesh.Trimesh()
     written = export_mod.export(
-        session.oriented, supports, out_dir / f"supported{suffix}", session.params, mode=mode
+        session.oriented,
+        supports,
+        out_dir / f"{stem}{suffix}",
+        session.params,
+        mode=mode,
+        # A separate export drops the supports out of the model file, so the
+        # marker cube is what keeps a floating model's pose visually honest —
+        # see `export_mod.plate_marker_cube`.
+        marker_cube=separate,
     )
-    path = written[0]
-    if mode == "separate":
-        zip_path = out_dir / "supported.zip"
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-            for p in written:
-                z.write(p, p.name)
-        path = zip_path
+    if mode == "separate" and part == "supports":
+        if len(written) < 2:
+            raise StageError(404, "no supports to export")
+        path = written[1]
+    else:
+        path = written[0]
     return path.name, path.read_bytes()

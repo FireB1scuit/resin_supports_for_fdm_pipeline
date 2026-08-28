@@ -138,8 +138,10 @@ class Router:
             if method != "GET":
                 return Response(405, {"detail": f"{method} not allowed on {path}"})
             session = self.store.get(m.group(1))
-            mode = (query.get("mode") or ["3mf"])[0]
-            name, payload = core.export_bytes(session, mode)
+            fmt = (query.get("fmt") or ["stl"])[0]
+            separate = (query.get("separate") or ["false"])[0].lower() in ("1", "true", "yes")
+            part = (query.get("part") or [None])[0]
+            name, payload = core.export_bytes(session, fmt=fmt, separate=separate, part=part)
             return Response(200, body=payload, filename=name)
 
         return Response(404, {"detail": f"no route for {method} {path}"})
