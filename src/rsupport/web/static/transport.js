@@ -31,8 +31,18 @@ async function httpApi(path, opts = {}) {
 
 function httpDownload(path) {
   // The server sets Content-Disposition, so the browser saves rather than
-  // navigates. Nothing to assemble here.
-  location.href = path;
+  // navigates — but not via `location.href`. Setting it a second time (the
+  // separate-files export downloads model then supports, one click) cancels
+  // whichever request that first assignment was still fetching before it
+  // ever reached a Content-Disposition header, so only the second file ever
+  // landed. A download-anchor click starts an independent browser download
+  // instead of a navigation, so two clicks in the same tick don't race.
+  const a = document.createElement('a');
+  a.href = path;
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 // ----------------------------------------------------------------- worker

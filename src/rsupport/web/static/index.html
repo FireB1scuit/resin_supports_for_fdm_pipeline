@@ -213,8 +213,8 @@
   }
 
   /* The dials fold away behind their heading. What is not a dial — the printer,
-     the pose, the result, the download — stays open: folding a three-button
-     export behind a click helps nobody. */
+     the pose, the result, the download — stays open: folding the export
+     controls behind a click helps nobody. */
   details.fold { border-top: 1px solid var(--line); }
   details.fold > summary {
     display: flex; align-items: center; gap: 7px;
@@ -486,7 +486,6 @@
       <ul>
         <li>multi model support (click on model and rotate it with 3 axis wheels instead of current sliders, wheels must also have a place to type in the rotation value)</li>
         <li>better support for big overhang area&#x27;s, different type there, detection needed first</li>
-        <li>export as separate models options (rotated/raised stl + supports)</li>
         <li>supports not on printbed only</li>
         <li>watermark at bottom of supports</li>
         <li>tracking web traffic</li>
@@ -759,15 +758,25 @@
 
     <section>
       <h2>download</h2>
-      <div class="btns">
-        <button id="dl3mf" class="primary" disabled>3MF</button>
-        <button id="dlstl" disabled>STL</button>
-        <button id="dlsep" disabled>both</button>
+      <div class="row" data-help="STL is one plain mesh (or two, with the box below ticked);
+           slice it with supports switched off. 3MF carries per-object layer heights in one
+           file instead &mdash; the model fine, the supports coarse.">
+        <label for="fmt3mf">3MF, not STL</label>
+        <input type="checkbox" id="fmt3mf">
       </div>
-      <p style="color:var(--dim); font-size:11px; margin:8px 0 0">
-        3MF carries per-object layer heights &mdash; model fine, supports coarse.
-        Slice the plain STL with supports switched <b>off</b>.
-      </p>
+      <div class="row" data-help="Write the model and the supports as two separate files instead
+           of one, so a slicer can treat them as separate objects with separate settings &mdash;
+           downloaded one after the other rather than zipped, since that's two plain files a
+           slicer opens directly. Because the model then ships with none of the supports that
+           normally hold it up, a 0.1&times;0.1&times;0.1&nbsp;mm marker cube is added at the
+           plate so a floating model still looks floating instead of like an accidental drop to
+           the bed.">
+        <label for="dlsep">separate support files</label>
+        <input type="checkbox" id="dlsep">
+      </div>
+      <div class="btns" style="margin-top:8px">
+        <button id="download" class="primary" disabled>download</button>
+      </div>
     </section>
   </div>
 

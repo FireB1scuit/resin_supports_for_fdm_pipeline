@@ -132,8 +132,8 @@ def api_mesh(sid: str, which: str) -> Response:
 
 
 @app.get("/api/export/{sid}")
-def api_export(sid: str, mode: str = "3mf") -> Response:
-    name, data = _staged(core.export_bytes, _get(sid), mode)
+def api_export(sid: str, fmt: str = "stl", separate: bool = False, part: str | None = None) -> Response:
+    name, data = _staged(core.export_bytes, _get(sid), fmt=fmt, separate=separate, part=part)
     return Response(
         data,
         media_type="application/octet-stream",
