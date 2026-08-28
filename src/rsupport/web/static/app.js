@@ -313,7 +313,7 @@ function applyVisibility() {
 /** mm per checker cell. A fixed viewer constant, not a support dimension —
  *  CLAUDE.md's "derive every millimetre from nozzle_diameter" rule is about
  *  geometry the generator builds, and this overlay builds nothing. */
-const OVERHANG_CHECK_MM = 2.5;
+const OVERHANG_CHECK_MM = 0.25;
 const OVERHANG_YELLOW = [0.95, 0.78, 0.05];
 const OVERHANG_BLACK = [0.04, 0.04, 0.04];
 
