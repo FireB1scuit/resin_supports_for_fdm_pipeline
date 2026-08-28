@@ -106,6 +106,108 @@ class SessionStore:
         return session
 
 
+@dataclass
+class Workspace:
+    """Which uploaded models belong together, and which of them is active.
+
+    A tab can hold more than one model now, but nothing about running a stage
+    changes: every function above still takes one model's own :class:`Session`
+    directly, addressed by its own ``sid``, and each session is exactly as
+    independent as it always was. A ``Workspace`` is bookkeeping the UI needs
+    — which sids came from drops into the same tab, and which one a click in
+    the viewer most recently chose — not a new place the pipeline runs.
+    Switching the active model touches nothing about any ``Session``: rotate,
+    lift and the build stages all still act only on the sid they are given.
+    """
+
+    id: str
+    model_ids: list[str] = field(default_factory=list)
+    names: dict[str, str] = field(default_factory=dict)
+    active: str | None = None
+    touched: float = field(default_factory=time.time)
+
+
+class WorkspaceStore:
+    """Same shape and the same eviction policy as :class:`SessionStore`, kept
+    separate because a workspace and the models in it are evicted
+    independently — losing one on its own schedule must not break the other.
+    """
+
+    def __init__(self, limit: int = MAX_SESSIONS):
+        self._workspaces: dict[str, Workspace] = {}
+        self._lock = threading.Lock()
+        self._limit = limit
+
+    def get(self, wid: str) -> Workspace:
+        with self._lock:
+            workspace = self._workspaces.get(wid)
+        if workspace is None:
+            raise StageError(404, "workspace not found — reload the page and start again")
+        workspace.touched = time.time()
+        return workspace
+
+    def put(self, workspace: Workspace) -> Workspace:
+        with self._lock:
+            self._workspaces[workspace.id] = workspace
+            if len(self._workspaces) > self._limit:
+                oldest = sorted(self._workspaces.values(), key=lambda w: w.touched)
+                for stale in oldest[: -self._limit]:
+                    self._workspaces.pop(stale.id, None)
+        return workspace
+
+
+def create_workspace() -> Workspace:
+    return Workspace(id=uuid.uuid4().hex[:12])
+
+
+def add_model(workspace: Workspace, session: Session, filename: str | None = None) -> None:
+    """Add a freshly uploaded model to a workspace and make it the active one.
+
+    Always the active one, not just the first: dropping a file has always put
+    it on screen immediately, and holding onto earlier models in the
+    background is not a reason to change what a drop does.
+    """
+    workspace.model_ids.append(session.id)
+    workspace.names[session.id] = filename or "model"
+    workspace.active = session.id
+    workspace.touched = time.time()
+
+
+def set_active(workspace: Workspace, sid: str) -> None:
+    """Point the workspace at a different one of its own models.
+
+    Every other route still takes an explicit sid, so this changes nothing
+    about the pipeline — it only records which sid the UI means by "the
+    active model" the next time it does not name one itself.
+    """
+    if sid not in workspace.model_ids:
+        raise StageError(404, f"{sid!r} is not a model in this workspace")
+    workspace.active = sid
+    workspace.touched = time.time()
+
+
+def workspace_payload(workspace: Workspace, store: SessionStore) -> dict:
+    """Every model in the workspace whose session is still alive, and which is
+    active. The two stores share a cap but not a clock, so a model can be
+    evicted out from under a workspace that still names it — left out here
+    rather than reported and then 404ing the moment it is clicked.
+    """
+    models = []
+    for mid in workspace.model_ids:
+        try:
+            session = store.get(mid)
+        except StageError:
+            continue
+        models.append({
+            "id": mid,
+            "name": workspace.names.get(mid),
+            "summary": mesh_io.summary(session.original),
+        })
+    live_ids = {m["id"] for m in models}
+    active = workspace.active if workspace.active in live_ids else None
+    return {"id": workspace.id, "active": active, "models": models}
+
+
 # ------------------------------------------------------------------ params
 
 

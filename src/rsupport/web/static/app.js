@@ -4,38 +4,94 @@ import { STLLoader } from './STLLoader.js';
 import { api, postJSON, download, isServerless, onProgress, warmUp } from './transport.js';
 
 // ---------------------------------------------------------------- state
+//
+// A tab can hold more than one uploaded model now (see the `models` section
+// below). Everything that used to be a single flat field on `state` — the
+// points, the dial-fed params, the stale flag, the lift, the meshes — is per
+// model, so it lives on a `ModelEntry` instead: `state.models` holds one per
+// upload, keyed by sid, and `state.activeSid` says which one every existing
+// single-model function (rotate, lift, points, supports, export…) currently
+// means when it reaches for "the" model. `active()` is that lookup. Nothing
+// downstream of a stage call had to learn about other models at all — it
+// still only ever touches the one entry `active()` hands it.
 
 const state = {
-  sid: null,
-  points: [],          // [{position:[x,y,z], normal:[..], forced, source}]
-  dropped: new Set(),  // indices into points that stage 3 could not support
-  params: null,        // last params the server reported back
-  presets: null,       // every preset the server knows, by name
-  preset: null,        // params of the preset named in the select, for drift
-  size: null,          // oriented bounding box, mm
-  overhangArea: null,  // mm^2 of flagged downward face
-  volume: null,        // mm^3 enclosed by the scaffold, overlaps counted twice
-  history: [],         // point lists before each hand edit — see undo()
+  workspaceId: null,   // groups every model this tab has uploaded — see core.Workspace
+  models: new Map(),   // sid -> ModelEntry
+  order: [],           // sids in upload order, for the model chips and the layout
+  activeSid: null,      // which model every stage call currently targets
+  presets: null,        // every preset the server knows, by name — shared across models
+  //: The preset the dropdown is currently naming. Shared rather than
+  //: per-model, the same way the printer a preset describes is shared across
+  //: whatever parts get dropped into one tab: choosing "0.6mm nozzle" for one
+  //: model is choosing it for the next upload too, not just for the model on
+  //: screen when the dropdown was touched.
+  presetName: null,
   busy: false,
-  //: What the view no longer answers for, worst case, since the last build:
-  //: null when it is current, otherwise a SCOPES name. Every dial writes this
-  //: instead of starting a run — see markStale.
-  stale: null,
-  //: The lift baked into the model mesh on screen, so a run knows whether the
-  //: mesh has to be fetched again. null means "not known", which is the state
-  //: a fresh upload is in: the session floats the model by its own preset's
-  //: lift and the payload does not say what that was.
-  lift: null,
-  //: A preset the select is naming but no stage has been told about yet. The
-  //: dials cannot carry one on their own — half of what a preset sets (the
-  //: nozzle, the clearances, the printable limit) has no slider — so the name
-  //: rides along with the next placement and is spent there.
-  pendingPreset: null,
+  //: A fixed spacing scheme, not a bin-packing one: each new model's group is
+  //: shifted just far enough clear of the one before it. Good enough to keep
+  //: several test models from overlapping in the viewport; it is a client-side
+  //: display offset only and is never sent to the server, which still only
+  //: ever sees each model in its own local frame (see switchModel/upload).
+  layoutRight: 0,
 };
 
-//: How many hand edits ctrl-Z can walk back. Each entry is a shallow copy of a
-//: point list, so this is bounded memory for an unbounded session.
+const LAYOUT_GAP = 15; // mm between one model's footprint and the next
+
+//: How many hand edits ctrl-Z can walk back, per model.
 const UNDO_DEPTH = 32;
+
+/** Everything the pipeline stages produce for one uploaded model, plus the
+ *  three.js objects that show it. Kept alive for as long as the model is —
+ *  switching the active model never disposes or re-fetches any of this, it
+ *  only changes which entry the rest of the app reads and writes. That is
+ *  what makes "click a model to make it active" cheap: the model you switch
+ *  back to is still exactly as you left it. */
+class ModelEntry {
+  constructor(sid, name, summary) {
+    this.sid = sid;
+    this.name = name;
+    this.summary = summary;
+    //: Its own group so several models can share one scene without their
+    //: geometry landing on top of each other — see layoutRight above. Every
+    //: mesh this model owns is a child of this group and nothing else.
+    this.group = new THREE.Group();
+    world.add(this.group);
+    this.modelMesh = null;
+    this.supportMesh = null;
+    this.markers = [];   // one InstancedMesh per flavour; .userData.at maps back to points
+
+    this.points = [];
+    this.dropped = new Set();
+    this.history = [];
+
+    this.params = null;
+    this.preset = null;
+    this.pendingPreset = null;
+    this.size = null;
+    this.overhangArea = null;
+    this.volume = null;
+    //: The full stage-3 response from the last successful build, kept so
+    //: switching back onto this model can redraw its stats line without a
+    //: fresh build — see showStats and switchModel.
+    this.lastBuild = null;
+
+    //: What this model's view no longer answers for, worst case, since its
+    //: last build. Same meaning as the old single-model `state.stale`.
+    this.stale = null;
+    //: The lift baked into this model's mesh on screen — see refloat.
+    this.lift = null;
+    //: The absolute rotation last applied to this model, so switching back to
+    //: it shows the pose it is actually sitting in rather than 0/0/0.
+    this.rotation = { rx: 0, ry: 0, rz: 0 };
+  }
+}
+
+/** The model every existing single-model function currently means by "the"
+ *  model — null before anything has been uploaded. */
+function active() {
+  return state.activeSid ? state.models.get(state.activeSid) : null;
+}
 
 /** Every element this file reaches for is one the page is expected to have, so
  *  a miss is never a case to handle — it means the script and the markup are
@@ -114,6 +170,13 @@ const MAT = {
   // against, and at the old value it was the brightest thing on screen — it
   // competed with the panel text and left the supports nowhere to go.
   model: new THREE.MeshStandardMaterial({ color: 0x7f8794, roughness: 0.72, metalness: 0.04, flatShading: false }),
+  // The other models sitting in the scene while one is active — dim and a
+  // little translucent, so the eye settles on the active model and the
+  // scaffold on it, and the rest read as "there, and clickable" rather than
+  // competing for attention.
+  modelInactive: new THREE.MeshStandardMaterial({
+    color: 0x565c66, roughness: 0.85, metalness: 0.0, transparent: true, opacity: 0.55,
+  }),
   supports: new THREE.MeshStandardMaterial({ color: 0xf2802e, roughness: 0.55, metalness: 0.05 }),
   // Contact points come in two flavours and the difference has to be readable
   // at a glance. Held ones are washed out on purpose — there are hundreds of
@@ -130,10 +193,6 @@ const MAT = {
   }),
   pointDropped: new THREE.MeshBasicMaterial({ color: 0xff3b30 }),
 };
-
-let modelMesh = null;
-let supportMesh = null;
-let markers = [];   // one InstancedMesh per flavour; .userData.at maps back to state.points
 
 const show = { model: true, supports: true, points: false, wire: false };
 
@@ -173,7 +232,7 @@ function log(msg, cls = '') {
   // and "placing support points" is a more useful thing to be told than that
   // the app is busy. Only a run: an upload or an export leaves the button
   // alone, because neither is something the button started.
-  if (active) setWorking(msg);
+  if (activeRun) setWorking(msg);
 }
 
 /** The generate button's label while it is running. The trailing ellipsis the
@@ -206,27 +265,27 @@ function busy(on, heavy = false) {
 
 // ------------------------------------------------------------ geometry io
 
-async function loadSTL(url, kind, signal) {
+async function loadSTL(m, url, kind, signal) {
   const buf = await (await api(url, { signal })).arrayBuffer();
   const geom = loader.parse(buf);
   geom.computeVertexNormals();
 
-  const mesh = new THREE.Mesh(geom, MAT[kind]);
+  const mesh = new THREE.Mesh(geom, kind === 'model' ? MAT.model : MAT.supports);
   if (kind === 'model') {
-    if (modelMesh) { world.remove(modelMesh); modelMesh.geometry.dispose(); }
-    modelMesh = mesh;
+    if (m.modelMesh) { m.group.remove(m.modelMesh); m.modelMesh.geometry.dispose(); }
+    m.modelMesh = mesh;
   } else {
-    if (supportMesh) { world.remove(supportMesh); supportMesh.geometry.dispose(); }
-    supportMesh = mesh;
+    if (m.supportMesh) { m.group.remove(m.supportMesh); m.supportMesh.geometry.dispose(); }
+    m.supportMesh = mesh;
   }
-  world.add(mesh);
+  m.group.add(mesh);
   applyVisibility();
   return mesh;
 }
 
-function frameModel() {
-  if (!modelMesh) return;
-  const box = new THREE.Box3().setFromObject(modelMesh);
+function frameModel(m) {
+  if (!m?.modelMesh) return;
+  const box = new THREE.Box3().setFromObject(m.modelMesh);
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
   const r = Math.max(size.length(), 10);
@@ -244,49 +303,75 @@ function frameModel() {
   axes.scale.setScalar(Math.max(1, g / 240));
 }
 
-function rebuildMarkers() {
-  markers.forEach(m => { world.remove(m); m.geometry.dispose(); });
-  markers = [];
-  if (!state.points.length) return;
+/** Where in the scene a freshly uploaded model's group should sit so it does
+ *  not land on top of the ones already there. Purely a display offset — every
+ *  point sent to the server is converted back into the model's own local
+ *  frame first (see the shift-click handler below), so nothing about the
+ *  pipeline ever sees it. The first model is left at its native position, so
+ *  a single-model session looks exactly as it always did. */
+function layoutNewModel(m) {
+  const box = new THREE.Box3().setFromObject(m.modelMesh);
+  if (state.order.length <= 1) {
+    state.layoutRight = box.max.x;
+    return;
+  }
+  const shift = (state.layoutRight + LAYOUT_GAP) - box.min.x;
+  m.group.position.x = shift;
+  state.layoutRight = box.max.x + shift;
+}
+
+function rebuildMarkers(m) {
+  m.markers.forEach(mk => { m.group.remove(mk); mk.geometry.dispose(); });
+  m.markers = [];
+  if (!m.points.length) { applyVisibility(); return; }
 
   // Split by whether stage 3 managed to support the point. Two meshes rather
   // than one with per-instance colours: opacity is a property of the material,
   // and the two flavours differ in it — held contacts are washed out because
   // there are hundreds of them over the surface you are trying to see, unheld
   // ones are solid because there are usually a handful and they are the news.
-  // Each mesh remembers which state.points index every instance came from, so
+  // Each mesh remembers which m.points index every instance came from, so
   // clicking one still deletes the right point.
   const held = [], unheld = [];
-  state.points.forEach((_, i) => (state.dropped.has(i) ? unheld : held).push(i));
+  m.points.forEach((_, i) => (m.dropped.has(i) ? unheld : held).push(i));
 
-  const r = (state.params?.tip_diameter ?? 0.3) * 1.6;
-  const m = new THREE.Matrix4();
+  const r = (m.params?.tip_diameter ?? 0.3) * 1.6;
+  const mat4 = new THREE.Matrix4();
   for (const [idx, mat, scale] of [[held, MAT.point, 1], [unheld, MAT.pointDropped, 1.45]]) {
     if (!idx.length) continue;
     const mesh = new THREE.InstancedMesh(new THREE.SphereGeometry(r * scale, 8, 6), mat, idx.length);
     idx.forEach((pi, i) => {
-      const p = state.points[pi].position;
-      m.makeTranslation(p[0], p[1], p[2]);
-      mesh.setMatrixAt(i, m);
+      const p = m.points[pi].position;
+      mat4.makeTranslation(p[0], p[1], p[2]);
+      mesh.setMatrixAt(i, mat4);
     });
     mesh.instanceMatrix.needsUpdate = true;
     mesh.userData.at = idx;
     // Solid markers draw last, so a dropped point stays visible through the
     // cloud of translucent ones around it.
     mesh.renderOrder = mat === MAT.pointDropped ? 2 : 1;
-    markers.push(mesh);
-    world.add(mesh);
+    m.markers.push(mesh);
+    m.group.add(mesh);
   }
   applyVisibility();
 }
 
+/** Every model's meshes are always in the scene — see ModelEntry — so this is
+ *  the one place that decides what actually shows: the active model at full
+ *  detail, following the view chips exactly as a single model always did, and
+ *  every other uploaded model as a dim, click-to-select placeholder with its
+ *  scaffold and points hidden regardless of the chips. */
 function applyVisibility() {
-  if (modelMesh) {
-    modelMesh.visible = show.model;
-    MAT.model.wireframe = show.wire;
+  for (const m of state.models.values()) {
+    const isActive = m.sid === state.activeSid;
+    if (m.modelMesh) {
+      m.modelMesh.visible = show.model;
+      m.modelMesh.material = isActive ? MAT.model : MAT.modelInactive;
+    }
+    if (m.supportMesh) m.supportMesh.visible = isActive && show.supports;
+    m.markers.forEach(mk => { mk.visible = isActive && show.points; });
   }
-  if (supportMesh) supportMesh.visible = show.supports;
-  markers.forEach(m => { m.visible = show.points; });
+  MAT.model.wireframe = show.wire;
 }
 
 // ---------------------------------------------------------------- params
@@ -345,6 +430,17 @@ function syncSliders(p) {
   if (p.parenting != null) $('parenting').value = p.parenting;
   showSliderValues();
   markDrift();
+}
+
+/** Put the current model's last-applied rotation into the wheels — used on
+ *  upload (0/0/0) and on switching the active model (whatever it was left
+ *  turned to). */
+function syncRotation(m) {
+  $('rotx').value = m.rotation.rx;
+  $('roty').value = m.rotation.ry;
+  $('rotz').value = m.rotation.rz;
+  showRotationValues();
+  ROTATION_IDS.forEach(id => updateWheel(id));
 }
 
 //
@@ -428,6 +524,97 @@ function bindValueBox(id) {
 
 VALUE_IDS.concat(ROTATION_IDS).forEach(bindValueBox);
 
+// ------------------------------------------------------------ rotation wheels
+//
+// Replaces the old linear sliders for X/Y/Z with a circular dial per axis —
+// dragging it around traces the actual turn the way a linear slider never
+// could. Each wheel wraps a plain `<input type=range min=-180 max=180>` that
+// is still the value every existing rotation function reads and writes
+// (`bindValueBox` above already wired its number box up to it); the wheel
+// only adds a second, circular way to move that same value; and it applies
+// on interaction exactly as the slider it replaced did — see `rerotate`
+// below, still bound to the range's `change` event.
+
+function initWheel(id) {
+  const s = $(id);
+  const wheel = $(id + '_wheel');
+  const pointer = wheel.querySelector('.dial-pointer');
+
+  wheel.setAttribute('aria-valuemin', s.min);
+  wheel.setAttribute('aria-valuemax', s.max);
+
+  let dragging = false;
+
+  function angleFromEvent(e) {
+    const rect = wheel.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+    const dx = e.clientX - cx, dy = e.clientY - cy;
+    // 0 degrees is straight up, positive clockwise — atan2(dx, -dy) gives
+    // exactly that, and it is already in [-180, 180], the wheel's own range.
+    const raw = Math.atan2(dx, -dy) * 180 / Math.PI;
+    return Math.max(+s.min, Math.min(+s.max, Math.round(raw)));
+  }
+
+  function move(e) {
+    if (!dragging) return;
+    const deg = angleFromEvent(e);
+    if (+s.value !== deg) {
+      s.value = deg;
+      s.step = 'any';
+      s.dispatchEvent(new Event('input'));
+    }
+  }
+
+  wheel.addEventListener('pointerdown', (e) => {
+    dragging = true;
+    wheel.setPointerCapture(e.pointerId);
+    move(e);
+  });
+  wheel.addEventListener('pointermove', move);
+  function release(e) {
+    if (!dragging) return;
+    dragging = false;
+    try { wheel.releasePointerCapture(e.pointerId); } catch { /* already gone */ }
+    s.step = s.dataset.step;
+    // Applies on release, same as letting go of the old linear slider —
+    // rotation is one of the two dials that acts at once rather than waiting
+    // for the generate button (see the note above `rerotate`).
+    s.dispatchEvent(new Event('change'));
+  }
+  wheel.addEventListener('pointerup', release);
+  wheel.addEventListener('pointercancel', release);
+
+  // Keyboard makes the wheel a real ARIA slider rather than a mouse-only one:
+  // the range itself is taken out of the tab order (tabindex="-1" in the
+  // markup) so the wheel is the sole, single stop for this control.
+  wheel.addEventListener('keydown', (e) => {
+    let delta = 0;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowUp') delta = 1;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') delta = -1;
+    else return;
+    e.preventDefault();
+    s.value = Math.max(+s.min, Math.min(+s.max, +s.value + delta));
+    s.dispatchEvent(new Event('input'));
+    s.dispatchEvent(new Event('change'));
+  });
+
+  s.addEventListener('input', () => updateWheel(id));
+  s.addEventListener('change', () => updateWheel(id));
+  updateWheel(id);
+}
+
+/** Point the wheel's indicator at the range's current value — called whenever
+ *  that value moves, whichever of the three ways it can move: the wheel being
+ *  dragged, the keyboard, or a value typed into the adjacent number box. */
+function updateWheel(id) {
+  const s = $(id);
+  const pointer = $(id + '_wheel').querySelector('.dial-pointer');
+  pointer.style.transform = `rotate(${+s.value}deg)`;
+  $(id + '_wheel').setAttribute('aria-valuenow', s.value);
+}
+
+ROTATION_IDS.forEach(initWheel);
+
 // ---------------------------------------------------------------- pipeline
 //
 // Nothing here starts on its own. A dial only records that what is on screen no
@@ -442,37 +629,122 @@ VALUE_IDS.concat(ROTATION_IDS).forEach(bindValueBox);
 const SCOPES = ['geometry', 'points'];
 
 function markStale(scope) {
-  if (state.stale === null || SCOPES.indexOf(scope) > SCOPES.indexOf(state.stale)) {
-    state.stale = scope;
+  const m = active();
+  if (!m) return;
+  if (m.stale === null || SCOPES.indexOf(scope) > SCOPES.indexOf(m.stale)) {
+    m.stale = scope;
   }
   paintGenerate();
+}
+
+/** The list of model chips in the panel, and the workspace header. Hidden
+ *  until a second model exists — with only one, a strip of one chip is noise
+ *  the sidebar already covers with the filename readout. */
+function renderModelChips() {
+  const box = $('modelChips');
+  box.innerHTML = '';
+  $('modelsSection').hidden = state.order.length < 2;
+  for (const sid of state.order) {
+    const m = state.models.get(sid);
+    if (!m) continue;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'chip' + (sid === state.activeSid ? ' on' : '');
+    btn.textContent = m.name || 'model';
+    btn.title = `switch to ${m.name || 'this model'}`;
+    btn.addEventListener('click', () => switchModel(sid));
+    box.appendChild(btn);
+  }
+}
+
+function filenameText(m) {
+  return `${m.name} — ${m.summary.faces.toLocaleString()} faces, ` +
+    m.summary.size.map(v => v.toFixed(1)).join(' × ') + ' mm';
+}
+
+/** Make a different already-uploaded model the active one.
+ *
+ *  Every pipeline function still only ever knows about "the" active model —
+ *  this is the one place that changes which model that is. Nothing about the
+ *  model being switched to or away from is rebuilt or re-fetched: each one's
+ *  meshes, points and dials have been sitting untouched in its own ModelEntry
+ *  since the last time it was active, so switching back to it shows exactly
+ *  what was left there. */
+async function switchModel(sid) {
+  if (sid === state.activeSid || state.busy) return;
+  const m = state.models.get(sid);
+  if (!m) return;
+  await stopRun();
+
+  state.activeSid = sid;
+  $('filename').textContent = filenameText(m);
+  $('asloaded').disabled = false;
+  syncRotation(m);
+  if (m.params) syncSliders(m.params);
+  markDrift();
+  frameModel(m);
+  applyVisibility();
+  rebuildMarkers(m);
+  $('resetpoints').disabled = !m.history.length;
+  if (m.lastBuild) showStats(m, m.lastBuild); else $('stats').innerHTML = '&mdash;';
+  ['dl3mf', 'dlstl', 'dlsep'].forEach(id => $(id).disabled = !m.supportMesh);
+  paintGenerate();
+  renderModelChips();
+
+  // Bookkeeping only: every other route already names its model explicitly
+  // by sid, so this changes nothing about the pipeline — it just keeps the
+  // server's own idea of "active" (used only for a future workspace view)
+  // in step with the one the UI is now acting on.
+  if (state.workspaceId) {
+    postJSON(`/api/workspace/${state.workspaceId}/active`, { sid }).catch(() => { /* cosmetic */ });
+  }
 }
 
 async function upload(file) {
   await stopRun();
   busy(true, true);
+  let m;
   try {
     $('log').innerHTML = '';
     log(`reading ${file.name} …`);
+
+    if (!state.workspaceId) {
+      state.workspaceId = (await (await api('/api/workspace', { method: 'POST' })).json()).id;
+    }
+
     const fd = new FormData();
     fd.append('file', file);
-    const info = await (await api('/api/model', { method: 'POST', body: fd })).json();
+    const ws = await (await api(`/api/workspace/${state.workspaceId}/model`, {
+      method: 'POST', body: fd,
+    })).json();
 
-    state.sid = info.id;
-    state.lift = null;
-    clearBuild();
-    $('filename').textContent = `${info.name} — ${info.summary.faces.toLocaleString()} faces, ` +
-      info.summary.size.map(v => v.toFixed(1)).join(' × ') + ' mm';
-    if (!info.summary.watertight) log('mesh is not watertight; results may be rough', 'w');
+    const sid = ws.active;
+    const info = ws.models.find((x) => x.id === sid);
+    m = new ModelEntry(sid, info.name, info.summary);
+    // Every fresh session starts on the server's own default preset (see
+    // core.load_model), so a model's baseline has to be told the same name
+    // the panel is currently showing — otherwise its own first build would
+    // quietly pick up the server's default nozzle and clearances instead of
+    // whatever preset this tab has actually settled on.
+    m.preset = state.presets?.[state.presetName] ?? null;
+    m.pendingPreset = state.presetName;
+    state.models.set(sid, m);
+    state.order.push(sid);
+    state.activeSid = sid;
+
+    $('filename').textContent = filenameText(m);
+    if (!m.summary.watertight) log('mesh is not watertight; results may be rough', 'w');
     $('drop').classList.add('hide');
     $('asloaded').disabled = false;
-    $('rotx').value = 0; $('roty').value = 0; $('rotz').value = 0;
-    showRotationValues();
+    syncRotation(m);
 
     // The file is taken as posed. It arrives already dropped onto the bed, so
     // there is nothing to decide.
-    await loadSTL(`/api/mesh/${state.sid}/model`, 'model');
-    frameModel();
+    await loadSTL(m, `/api/mesh/${sid}/model`, 'model');
+    layoutNewModel(m);
+    frameModel(m);
+    applyVisibility();
+    renderModelChips();
     log('using the pose from the file', 'g');
   } catch (err) {
     log(`error: ${err.message}`, 'e');
@@ -481,64 +753,73 @@ async function upload(file) {
   }
   busy(false);
 
-  // The one build nobody has to ask for. There is nothing on the canvas yet, so
-  // there is nothing for a press to be a decision about — and a tool whose whole
-  // output is visual should not open on an empty stage. Every change after this
-  // one waits for the button.
+  // The one build nobody has to ask for. There is nothing shown for this
+  // model yet, so there is nothing for a press to be a decision about — and
+  // a tool whose whole output is visual should not open on an empty stage.
+  // Every change after this one waits for the button.
   markStale('points');
   await generate();
 }
 
-/** Drop the scaffold and the contact points, and everything else that was only
- *  true because of them. They belong to a pose or a model that no longer
+/** Drop this model's scaffold and contact points, and everything else that
+ *  was only true because of them. They belong to a pose that no longer
  *  exists, so leaving them up while the next build is asked for would be
  *  showing the answer to a question nobody is still asking.
  *
  *  The download buttons go with them, and that is not tidiness: re-posing the
  *  model clears the session's supports server-side, so an export taken in this
  *  window is a model and an empty scaffold, written out without complaint. */
-function clearBuild() {
-  if (supportMesh) {
-    world.remove(supportMesh);
-    supportMesh.geometry.dispose();
-    supportMesh = null;
+function clearBuild(m) {
+  if (m.supportMesh) {
+    m.group.remove(m.supportMesh);
+    m.supportMesh.geometry.dispose();
+    m.supportMesh = null;
   }
-  state.points = [];
-  state.dropped = new Set();
-  state.history = [];
-  state.volume = null;
-  $('resetpoints').disabled = true;
-  $('stats').innerHTML = '&mdash;';
-  ['dl3mf', 'dlstl', 'dlsep'].forEach(id => $(id).disabled = true);
-  rebuildMarkers();
+  m.points = [];
+  m.dropped = new Set();
+  m.history = [];
+  m.volume = null;
+  // Otherwise switching onto this model before it is rebuilt would redraw the
+  // stats line from a build that belongs to the pose just left behind — see
+  // switchModel, which falls back to this whenever there is nothing fresher.
+  m.lastBuild = null;
+  if (m.sid === state.activeSid) {
+    $('resetpoints').disabled = true;
+    $('stats').innerHTML = '&mdash;';
+    ['dl3mf', 'dlstl', 'dlsep'].forEach(id => $(id).disabled = true);
+  }
+  rebuildMarkers(m);
 }
 
-/** Rotation sliders are absolute, always applied from the file's own pose —
- *  so re-running with all three at 0 is exactly the file's pose. */
-async function runRotate() {
+/** Rotation is absolute, always applied from the file's own pose — so
+ *  re-running with all three at 0 is exactly the file's pose. */
+async function runRotate(m) {
   const rx = +$('rotx').value, ry = +$('roty').value, rz = +$('rotz').value;
   log('rotating the model …');
-  const r = await postJSON(`/api/rotate/${state.sid}`, { rx, ry, rz, overrides: overrides() });
-  await loadSTL(`/api/mesh/${state.sid}/model`, 'model');
-  state.lift = +$('lift').value;
-  frameModel();
+  const r = await postJSON(`/api/rotate/${m.sid}`, { rx, ry, rz, overrides: overrides() });
+  m.rotation = { rx, ry, rz };
+  await loadSTL(m, `/api/mesh/${m.sid}/model`, 'model');
+  m.lift = +$('lift').value;
+  frameModel(m);
   log(`rotated (${r.elapsed.toFixed(2)}s)`, 'g');
 }
 
 /** Turning the model is not a build, and it does not wait for the button.
  *
- *  Posing is done by eye — turn it, look, turn it back — and a rotation slider
- *  that moves nothing until a second control is pressed cannot be used that way
- *  at all. So the pose is applied at once and only the scaffold is left out of
- *  date. What was already built came off the old pose and would now be standing
- *  through the model rather than under it, so it goes rather than hanging about
- *  looking like a result. */
+ *  Posing is done by eye — turn it, look, turn it back — and a rotation
+ *  control that moves nothing until a second control is pressed cannot be
+ *  used that way at all. So the pose is applied at once (the wheel commits on
+ *  release, same as the slider it replaced committed on drag-end) and only
+ *  the scaffold is left out of date. What was already built came off the old
+ *  pose and would now be standing through the model rather than under it, so
+ *  it goes rather than hanging about looking like a result. */
 async function rerotate() {
-  if (!state.sid || state.busy) return;
+  const m = active();
+  if (!m || state.busy) return;
   busy(true);
   try {
-    clearBuild();
-    await runRotate();
+    clearBuild(m);
+    await runRotate(m);
     markStale('points');
   } catch (err) {
     log(`error: ${err.message}`, 'e');
@@ -552,75 +833,79 @@ ROTATION_IDS.forEach(id => $(id).addEventListener('change', rerotate));
 $('asloaded').onclick = () => {
   $('rotx').value = 0; $('roty').value = 0; $('rotz').value = 0;
   showRotationValues();
+  ROTATION_IDS.forEach(id => updateWheel(id));
   rerotate();
 };
 
 /** Take a stage-2 result, whoever asked for it. */
-function absorbPoints(r) {
-  state.points = r.points;
-  state.dropped = new Set();
+function absorbPoints(m, r) {
+  m.points = r.points;
+  m.dropped = new Set();
   // A fresh placement is not something ctrl-Z can walk back into: the edits in
   // the stack belong to a point list that no longer exists.
-  state.history = [];
-  state.size = r.size || null;
-  state.overhangArea = r.overhang_area ?? null;
-  $('resetpoints').disabled = true;
-  rebuildMarkers();
-  const forced = state.points.filter(p => p.forced).length;
-  log(`${state.points.length} points (${forced} mandatory) in ${r.elapsed.toFixed(2)}s`, 'g');
+  m.history = [];
+  m.size = r.size || null;
+  m.overhangArea = r.overhang_area ?? null;
+  if (m.sid === state.activeSid) $('resetpoints').disabled = true;
+  rebuildMarkers(m);
+  const forced = m.points.filter(p => p.forced).length;
+  log(`${m.points.length} points (${forced} mandatory) in ${r.elapsed.toFixed(2)}s`, 'g');
 }
 
-async function runPoints(run) {
+async function runPoints(m, run) {
   log('placing support points …');
   const body = { overrides: overrides() };
   // A preset is a base the dials sit on top of, not a set of dial values: the
   // nozzle, the clearances and the printable limit come with it and have no
   // slider anywhere in the panel. Sending the name is the only way stage 2
   // hears about those.
-  if (state.pendingPreset) body.preset = state.pendingPreset;
-  const r = await postJSON(`/api/points/${state.sid}`, body, run?.ac.signal);
+  if (m.pendingPreset) body.preset = m.pendingPreset;
+  const r = await postJSON(`/api/points/${m.sid}`, body, run?.ac.signal);
   halt(run);
   // Only now is the preset spent. A stopped run has not applied it, so it has
   // to still be owed to the next one.
-  state.pendingPreset = null;
-  absorbPoints(r);
+  m.pendingPreset = null;
+  absorbPoints(m, r);
 }
 
 /** Stage 2 is what floats the model, so a lift that has moved leaves the mesh
  *  on screen at the old height — either at the wrong Z outright, or carrying
  *  the local offset previewLift put on it. It is the largest thing on the wire,
  *  so it is fetched again only when one of those is actually true. */
-async function refloat(run) {
-  if (state.lift === +$('lift').value && modelMesh && modelMesh.position.z === 0) return;
-  await loadSTL(`/api/mesh/${state.sid}/model`, 'model', run?.ac.signal);
-  state.lift = +$('lift').value;
+async function refloat(m, run) {
+  if (m.lift === +$('lift').value && m.modelMesh && m.modelMesh.position.z === 0) return;
+  await loadSTL(m, `/api/mesh/${m.sid}/model`, 'model', run?.ac.signal);
+  m.lift = +$('lift').value;
 }
 
-async function runSupports(run) {
+async function runSupports(m, run) {
   log('building support geometry …');
-  const r = await postJSON(`/api/supports/${state.sid}`, {
+  const r = await postJSON(`/api/supports/${m.sid}`, {
     overrides: overrides(),
-    points: state.points,
+    points: m.points,
   }, run?.ac.signal);
   halt(run);
-  state.params = r.params;
-  state.dropped = new Set(r.dropped_points || []);
+  m.params = r.params;
+  m.dropped = new Set(r.dropped_points || []);
   syncSliders(r.params);
-  await loadSTL(`/api/mesh/${state.sid}/supports`, 'supports', run?.ac.signal).catch((err) => {
+  await loadSTL(m, `/api/mesh/${m.sid}/supports`, 'supports', run?.ac.signal).catch((err) => {
     // A model needing no supports at all answers 404 here, which is not news.
     // A stopped run answers with an abort, which is — it must not be swallowed
     // into "no supports needed", or stopping would look like an empty result.
     if (err.name === 'AbortError') throw err;
     log('no supports needed', 'g');
   });
-  rebuildMarkers();
+  rebuildMarkers(m);
 
-  state.volume = r.volume ?? null;
-  showStats(r);
+  m.volume = r.volume ?? null;
+  m.lastBuild = r;
+  showStats(m, r);
   (r.warnings || []).slice(0, 5).forEach(w => log(w, 'w'));
   log(`built in ${r.elapsed.toFixed(2)}s`, 'g');
 
-  ['dl3mf', 'dlstl', 'dlsep'].forEach(id => $(id).disabled = false);
+  if (m.sid === state.activeSid) {
+    ['dl3mf', 'dlstl', 'dlsep'].forEach(id => $(id).disabled = false);
+  }
 }
 
 //: g/cm^3. PLA, because that is what an FDM scaffold gets printed in more often
@@ -635,25 +920,25 @@ const DENSITY = 1.24;
  *  model is the only thing that meaningfully shrinks it. The mass is deliberately
  *  hedged — the scaffold is exported as overlapping closed shells, so its signed
  *  volume counts every junction twice and the true figure is somewhat under. */
-function showStats(r) {
+function showStats(m, r) {
   const bits = [`<b>${r.points}</b> supports &middot; <b>${r.braces}</b> links`,
                 `<b>${r.faces.toLocaleString()}</b> triangles`];
 
-  if (state.size) {
-    bits.push(`<b>${state.size.map(v => v.toFixed(1)).join(' × ')}</b> mm`);
+  if (m.size) {
+    bits.push(`<b>${m.size.map(v => v.toFixed(1)).join(' × ')}</b> mm`);
   }
-  if (state.overhangArea != null) {
-    bits.push(`<b>${(state.overhangArea / 100).toFixed(1)}</b> cm&sup2; overhang`);
+  if (m.overhangArea != null) {
+    bits.push(`<b>${(m.overhangArea / 100).toFixed(1)}</b> cm&sup2; overhang`);
   }
-  if (state.volume) {
-    const grams = (state.volume / 1000) * DENSITY;
+  if (m.volume) {
+    const grams = (m.volume / 1000) * DENSITY;
     bits.push(`under <b>${grams.toFixed(1)}</b> g of support`);
   }
   if (r.dropped) {
     bits.push(`<span style="color:var(--err)"><b>${r.dropped}</b> unsupported ` +
               `&mdash; shown in solid red</span>`);
   }
-  $('stats').innerHTML = bits.join('<br>');
+  if (m.sid === state.activeSid) $('stats').innerHTML = bits.join('<br>');
 }
 
 /** The lift is a translation in Z and nothing else, so the mesh on screen can
@@ -663,7 +948,8 @@ function showStats(r) {
  *  is exactly what out of date looks like. The next build fetches the properly
  *  floated mesh back and the offset goes with it — see refloat. */
 function previewLift() {
-  if (modelMesh && state.lift !== null) modelMesh.position.z = +$('lift').value - state.lift;
+  const m = active();
+  if (m?.modelMesh && m.lift !== null) m.modelMesh.position.z = +$('lift').value - m.lift;
 }
 
 // ---------------------------------------------------------------- runs
@@ -691,45 +977,46 @@ function previewLift() {
 
 class Stopped extends Error {}
 
-let active = null;    // the run in flight, or null
+let activeRun = null; // the run in flight, or null
 let running = null;   // its promise, for anyone who has to wait for it to let go
 
 function halt(run) { if (run?.stop) throw new Stopped(); }
 
 /** The button. A press builds; a press while it is building stops the build. */
 function generate() {
-  if (active) return stopRun();
-  if (!state.sid || state.busy) return Promise.resolve();
+  if (activeRun) return stopRun();
+  const m = active();
+  if (!m || state.busy) return Promise.resolve();
 
   // A press with nothing out of date rebuilds the scaffold anyway. It is a
   // second or two, it is what was asked for, and a button that ignores a press
   // is indistinguishable from a broken one.
-  const scope = state.stale ?? 'geometry';
-  active = { stop: false, ac: new AbortController() };
-  running = runAll(scope, active);
+  const scope = m.stale ?? 'geometry';
+  activeRun = { stop: false, ac: new AbortController() };
+  running = runAll(m, scope, activeRun);
   return running;
 }
 
-async function runAll(scope, run) {
-  state.stale = null;
+async function runAll(m, scope, run) {
+  m.stale = null;
   busy(true);
   setWorking('working');
   try {
     if (scope !== 'geometry') {
-      await runPoints(run);
+      await runPoints(m, run);
       halt(run);
-      await refloat(run);
+      await refloat(m, run);
       halt(run);
     }
-    await runSupports(run);
+    await runSupports(m, run);
   } catch (err) {
     // Whatever did not finish leaves the view where it already was: out of
     // date, and now saying so again.
-    markStale(scope);
+    m.stale = scope;
     if (err instanceof Stopped || err.name === 'AbortError') log('stopped', 'w');
     else log(`error: ${err.message}`, 'e');
   } finally {
-    active = null;
+    activeRun = null;
     running = null;
     busy(false);
   }
@@ -739,10 +1026,10 @@ async function runAll(scope, run) {
  *  over when this returns — see the note above — so the button goes on saying
  *  what it is doing until it is. */
 function stopRun() {
-  if (!active) return Promise.resolve();
-  if (!active.stop) {
-    active.stop = true;
-    active.ac.abort();
+  if (!activeRun) return Promise.resolve();
+  if (!activeRun.stop) {
+    activeRun.stop = true;
+    activeRun.ac.abort();
     log('stopping …', 'w');
     setWorking('stopping');
     paintGenerate();
@@ -759,11 +1046,12 @@ const TIP_STOPPING = 'stopping — the stage already running has to finish';
  *  the two things a press would do. */
 function paintGenerate() {
   const b = $('generate');
-  b.disabled = !state.sid || (state.busy && !active) || !!active?.stop;
-  b.classList.toggle('running', !!active);
-  b.classList.toggle('stale', !active && state.stale !== null);
-  if (!active) $('genlabel').textContent = 'generate';
-  $('gentip').textContent = active ? (active.stop ? TIP_STOPPING : TIP_RUNNING) : TIP_IDLE;
+  const m = active();
+  b.disabled = !m || (state.busy && !activeRun) || !!activeRun?.stop;
+  b.classList.toggle('running', !!activeRun);
+  b.classList.toggle('stale', !activeRun && !!m && m.stale !== null);
+  if (!activeRun) $('genlabel').textContent = 'generate';
+  $('gentip').textContent = activeRun ? (activeRun.stop ? TIP_STOPPING : TIP_RUNNING) : TIP_IDLE;
 }
 
 $('generate').addEventListener('click', generate);
@@ -869,18 +1157,24 @@ addEventListener('resize', hideHelp);
 // force a whole fresh placement. Every hand edit now files the list it started
 // from, and ctrl-Z walks back through them.
 //
-function pushHistory() {
-  state.history.push(state.points.slice());
-  if (state.history.length > UNDO_DEPTH) state.history.shift();
-  $('resetpoints').disabled = false;
+// A plain click that lands on a model other than the active one does neither
+// of those — it switches which model is active, the viewport equivalent of
+// the model chips in the panel. Shift-click and marker deletion still only
+// ever act on the active model's own mesh and markers.
+//
+function pushHistory(m) {
+  m.history.push(m.points.slice());
+  if (m.history.length > UNDO_DEPTH) m.history.shift();
+  if (m.sid === state.activeSid) $('resetpoints').disabled = false;
 }
 
 function undo() {
-  if (!state.sid || state.busy || !state.history.length) return;
-  state.points = state.history.pop();
-  state.dropped = new Set();
-  rebuildMarkers();
-  log(`undone — ${state.points.length} points`);
+  const m = active();
+  if (!m || state.busy || !m.history.length) return;
+  m.points = m.history.pop();
+  m.dropped = new Set();
+  rebuildMarkers(m);
+  log(`undone — ${m.points.length} points`);
   markStale('geometry');
 }
 
@@ -904,44 +1198,62 @@ renderer.domElement.addEventListener('pointerdown', (e) => { downAt = { x: e.cli
 renderer.domElement.addEventListener('pointerup', (e) => {
   // Ignore the pointerup that ends an orbit drag.
   if (!downAt || Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 4) return;
-  if (!state.sid || state.busy) return;
+  if (state.busy) return;
+  const m = active();
+  if (!m) return;
 
   const rect = renderer.domElement.getBoundingClientRect();
   ndc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
   ndc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(ndc, camera);
 
-  if (e.shiftKey && modelMesh) {
-    const hit = raycaster.intersectObject(modelMesh, false)[0];
+  if (e.shiftKey) {
+    if (!m.modelMesh) return;
+    const hit = raycaster.intersectObject(m.modelMesh, false)[0];
     if (!hit) return;
-    const n = hit.face.normal.clone().transformDirection(modelMesh.matrixWorld);
-    pushHistory();
-    state.points.push({
-      position: hit.point.toArray(),
+    const n = hit.face.normal.clone().transformDirection(m.modelMesh.matrixWorld);
+    // The group carries a purely visual layout offset (see layoutNewModel) —
+    // the point sent to the server has to be back in the model's own local
+    // frame, the one it thinks z=0 and the plate mean.
+    const local = hit.point.clone().sub(m.group.position);
+    pushHistory(m);
+    m.points.push({
+      position: local.toArray(),
       normal: n.toArray(),
       forced: true,          // a hand-placed support is never thinned away
       source: 'manual',
     });
     log('added a support');
-    state.dropped = new Set();
-    rebuildMarkers();
+    m.dropped = new Set();
+    rebuildMarkers(m);
     markStale('geometry');
     return;
   }
 
-  if (markers.length && show.points) {
-    const hit = raycaster.intersectObjects(markers, false)[0];
+  if (m.markers.length && show.points) {
+    const hit = raycaster.intersectObjects(m.markers, false)[0];
     if (hit && hit.instanceId != null) {
       // Instances are grouped by flavour, so the instance index is not the
       // point index — the mesh carries the mapping back.
-      pushHistory();
-      state.points.splice(hit.object.userData.at[hit.instanceId], 1);
+      pushHistory(m);
+      m.points.splice(hit.object.userData.at[hit.instanceId], 1);
       log('deleted a support');
-      state.dropped = new Set();
-      rebuildMarkers();
+      m.dropped = new Set();
+      rebuildMarkers(m);
       markStale('geometry');
+      return;
     }
   }
+
+  // Nothing above matched: a plain click on some model's surface. If it is a
+  // model other than the active one, that click is the whole gesture — click
+  // a model to make it active, same as clicking its chip in the panel.
+  const meshes = [...state.models.values()].map((x) => x.modelMesh).filter(Boolean);
+  if (!meshes.length) return;
+  const hit = raycaster.intersectObjects(meshes, false)[0];
+  if (!hit) return;
+  const owner = [...state.models.values()].find((x) => x.modelMesh === hit.object);
+  if (owner && owner.sid !== state.activeSid) switchModel(owner.sid);
 });
 
 document.querySelectorAll('[data-toggle]').forEach(btn => {
@@ -998,11 +1310,12 @@ function differs(a, b) {
  *  still naming, and offer the way back. Without this the panel simply lies
  *  after the first nudge: it goes on saying "ender3" whatever you do to it. */
 function markDrift() {
-  if (!state.preset) return;
+  const m = active();
+  if (!m?.preset) return;
   const now = overrides();
   let any = false;
   for (const [fold, keys] of Object.entries(FOLD_KEYS)) {
-    const off = keys.some(k => state.preset[k] !== undefined && differs(now[k], state.preset[k]));
+    const off = keys.some(k => m.preset[k] !== undefined && differs(now[k], m.preset[k]));
     any = any || off;
     const el = document.querySelector(`details.fold[data-fold="${fold}"] .drift`);
     if (el) el.classList.toggle('on', off);
@@ -1017,16 +1330,20 @@ function markDrift() {
  *  points and then had its geometry built out of the old preset's numbers. The
  *  name matters because half of a preset — the nozzle, the clearances, the
  *  printable limit — reaches no slider at all, and only stage 2 being told the
- *  name picks that half up. It rides on state.pendingPreset until it does. */
+ *  name picks that half up. It rides on m.pendingPreset until it does. */
 function applyPreset(name) {
+  state.presetName = name;
+  const m = active();
   const p = state.presets?.[name];
   if (p) {
-    state.preset = p;
+    if (m) m.preset = p;
     syncSliders(p);
   }
-  state.pendingPreset = name;
-  markDrift();
-  if (state.sid) markStale('points');
+  if (m) {
+    m.pendingPreset = name;
+    markDrift();
+    markStale('points');
+  }
 }
 
 $('preset').addEventListener('change', () => applyPreset($('preset').value));
@@ -1054,10 +1371,11 @@ $('resetpoints').onclick = () => {
 
 for (const [id, mode] of [['dl3mf', '3mf'], ['dlstl', 'combined'], ['dlsep', 'separate']]) {
   $(id).onclick = async () => {
-    if (!state.sid) return;
+    const m = active();
+    if (!m) return;
     // Serverless there is nothing to navigate to: the file is assembled in the
     // tab and handed over as a blob. `download` hides which of the two it is.
-    try { busy(true); await download(`/api/export/${state.sid}?mode=${mode}`); }
+    try { busy(true); await download(`/api/export/${m.sid}?mode=${mode}`); }
     catch (err) { log(`export failed: ${err.message}`, 'e'); }
     finally { busy(false); }
   };
@@ -1072,13 +1390,13 @@ for (const ev of ['dragenter', 'dragover']) {
 document.addEventListener('dragleave', (e) => {
   if (e.relatedTarget) return;
   drop.classList.remove('over');
-  if (state.sid) drop.classList.add('hide');
+  if (state.activeSid) drop.classList.add('hide');
 });
 document.addEventListener('drop', (e) => {
   e.preventDefault();
   drop.classList.remove('over');
   const file = e.dataTransfer?.files?.[0];
-  if (file) upload(file); else if (state.sid) drop.classList.add('hide');
+  if (file) upload(file); else if (state.activeSid) drop.classList.add('hide');
 });
 drop.addEventListener('click', () => {
   const input = document.createElement('input');
@@ -1166,9 +1484,11 @@ placeLegend();
     }
     sel.value = def;
     state.presets = presets;
-    state.preset = presets[def];
+    state.presetName = def;
+    // Sliders reflect the chosen preset even before a model exists, so the
+    // very first upload's stage-2 call sends sensible overrides rather than
+    // whatever the bare HTML attributes happened to default to.
     syncSliders(presets[def]);
-    state.params = presets[def];
   } catch (err) {
     busy(false);
     log(isServerless

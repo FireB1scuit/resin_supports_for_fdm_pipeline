@@ -36,6 +36,9 @@ __all__ = ["Router", "route"]
 _MESH = re.compile(r"^/api/mesh/([^/]+)/([^/]+)$")
 _EXPORT = re.compile(r"^/api/export/([^/]+)$")
 _STAGE = re.compile(r"^/api/(orient|rotate|points|supports)/([^/]+)$")
+_WORKSPACE_MODEL = re.compile(r"^/api/workspace/([^/]+)/model$")
+_WORKSPACE_ACTIVE = re.compile(r"^/api/workspace/([^/]+)/active$")
+_WORKSPACE_GET = re.compile(r"^/api/workspace/([^/]+)$")
 
 
 class Response:
@@ -81,6 +84,9 @@ class Router:
 
     def __init__(self):
         self.store = SessionStore()
+        #: Same relationship as in `rsupport.web.app`: a separate store because
+        #: a workspace and the models it names are evicted independently.
+        self.workspaces = core.WorkspaceStore()
 
     # -- entry point ---------------------------------------------------- #
 
@@ -113,6 +119,35 @@ class Router:
             session = core.load_model(bytes(data), filename)
             self.store.put(session)
             return Response(200, core.model_payload(session, filename))
+
+        if path == "/api/workspace" and method == "POST":
+            workspace = core.create_workspace()
+            self.workspaces.put(workspace)
+            return Response(200, core.workspace_payload(workspace, self.store))
+
+        if m := _WORKSPACE_MODEL.match(path):
+            if method != "POST":
+                return Response(405, {"detail": f"{method} not allowed on {path}"})
+            workspace = self.workspaces.get(m.group(1))
+            if data is None:
+                raise StageError(400, "no file data")
+            session = core.load_model(bytes(data), filename)
+            self.store.put(session)
+            core.add_model(workspace, session, filename)
+            return Response(200, core.workspace_payload(workspace, self.store))
+
+        if m := _WORKSPACE_ACTIVE.match(path):
+            if method != "POST":
+                return Response(405, {"detail": f"{method} not allowed on {path}"})
+            workspace = self.workspaces.get(m.group(1))
+            core.set_active(workspace, str(body.get("sid", "")))
+            return Response(200, core.workspace_payload(workspace, self.store))
+
+        if m := _WORKSPACE_GET.match(path):
+            if method != "GET":
+                return Response(405, {"detail": f"{method} not allowed on {path}"})
+            workspace = self.workspaces.get(m.group(1))
+            return Response(200, core.workspace_payload(workspace, self.store))
 
         if m := _STAGE.match(path):
             if method != "POST":

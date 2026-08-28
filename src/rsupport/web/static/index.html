@@ -273,6 +273,37 @@
   .row label { flex: 1; min-width: 0; color: var(--dim); }
   input[type=range] { flex: 0 1 96px; min-width: 52px; accent-color: var(--control); }
 
+  /* The rotation wheel. It carries a real, focusable ARIA slider role of its
+     own — the native <input type=range> beside it is the value the rest of
+     the app already reads and writes (see app.js), kept purely as that store
+     and taken out of the tab order so a wheel is not two stops in it. Drag
+     anywhere on the face; the pointer inside shows the current angle the way
+     a physical dial would, 0 pointing straight up. */
+  .dial {
+    position: relative; flex: none; width: 30px; height: 30px; border-radius: 50%;
+    background: var(--panel-2); border: 1px solid var(--line);
+    cursor: grab; touch-action: none;
+  }
+  .dial:hover { border-color: var(--line-2); }
+  .dial:active { cursor: grabbing; }
+  .dial::after {
+    content: ""; position: absolute; left: 50%; top: 50%; width: 4px; height: 4px;
+    margin: -2px 0 0 -2px; border-radius: 50%; background: var(--dim);
+  }
+  .dial-face { position: absolute; inset: 0; }
+  .dial-pointer {
+    position: absolute; left: 50%; top: 3px; width: 2px; height: 11px;
+    margin-left: -1px; border-radius: 1px; background: var(--control);
+    transform-origin: 50% 12px; pointer-events: none;
+  }
+  /* The native range is visually hidden rather than display:none — it stays
+     in the layout as a real element with real focus and change events, just
+     with no footprint and no box a sighted user would see. */
+  .dial-native {
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+    border: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap;
+  }
+
   /* The number beside a slider is the same value, typed instead of dragged.
      It reads as a readout until you click into it. */
   .num {
@@ -479,7 +510,6 @@
     <div id="todolist" role="tooltip">
       <h3>still on the list</h3>
       <ul>
-        <li>multi model support (click on model and rotate it with 3 axis wheels instead of current sliders, wheels must also have a place to type in the rotation value)</li>
         <li>integrate overhang region view (like in lychee) toggle on or off using a button on the top left</li>
         <li>longer struct lengths/ variable strut lengths (give min and max strut range)</li>
         <li>better support for big overhang area&#x27;s, different type there, detection needed first</li>
@@ -722,26 +752,52 @@
       <h2>orientation</h2>
       <p style="color:var(--dim); font-size:11px; margin:0 0 8px">
         The model is used exactly as posed in the file, set down on the bed.
-        Rotate it by hand if it needs to sit differently.
+        Rotate it by hand if it needs to sit differently — drag a wheel, or
+        type a value straight into its box.
       </p>
       <div class="row">
-        <label for="rotx">rotate X</label>
-        <input type="range" id="rotx" min="-180" max="180" step="1" value="0">
+        <label id="rotx_label">rotate X</label>
+        <div class="dial" id="rotx_wheel" role="slider" aria-labelledby="rotx_label"
+             aria-valuemin="-180" aria-valuemax="180" tabindex="0">
+          <div class="dial-face"><div class="dial-pointer"></div></div>
+        </div>
+        <input type="range" id="rotx" min="-180" max="180" step="1" value="0"
+               class="dial-native" tabindex="-1" aria-hidden="true">
         <span class="num"><input type="number" id="rotx_v" aria-label="rotx value"><i>&deg;</i></span>
       </div>
       <div class="row">
-        <label for="roty">rotate Y</label>
-        <input type="range" id="roty" min="-180" max="180" step="1" value="0">
+        <label id="roty_label">rotate Y</label>
+        <div class="dial" id="roty_wheel" role="slider" aria-labelledby="roty_label"
+             aria-valuemin="-180" aria-valuemax="180" tabindex="0">
+          <div class="dial-face"><div class="dial-pointer"></div></div>
+        </div>
+        <input type="range" id="roty" min="-180" max="180" step="1" value="0"
+               class="dial-native" tabindex="-1" aria-hidden="true">
         <span class="num"><input type="number" id="roty_v" aria-label="roty value"><i>&deg;</i></span>
       </div>
       <div class="row">
-        <label for="rotz">rotate Z</label>
-        <input type="range" id="rotz" min="-180" max="180" step="1" value="0">
+        <label id="rotz_label">rotate Z</label>
+        <div class="dial" id="rotz_wheel" role="slider" aria-labelledby="rotz_label"
+             aria-valuemin="-180" aria-valuemax="180" tabindex="0">
+          <div class="dial-face"><div class="dial-pointer"></div></div>
+        </div>
+        <input type="range" id="rotz" min="-180" max="180" step="1" value="0"
+               class="dial-native" tabindex="-1" aria-hidden="true">
         <span class="num"><input type="number" id="rotz_v" aria-label="rotz value"><i>&deg;</i></span>
       </div>
       <div class="btns" style="margin-top:6px">
         <button id="asloaded" disabled>file&rsquo;s pose</button>
       </div>
+    </section>
+
+    <section id="modelsSection" hidden>
+      <h2>models</h2>
+      <p style="color:var(--dim); font-size:11px; margin:0 0 8px">
+        Every model dropped stays loaded. Click one here, or click it in the
+        viewport, to make it the active one — rotation, lift and the build
+        stages all act on whichever model is active.
+      </p>
+      <div id="modelChips" style="display:flex; flex-wrap:wrap; gap:6px"></div>
     </section>
 
     <section>
