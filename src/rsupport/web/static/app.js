@@ -808,7 +808,7 @@ async function switchModel(sid) {
   rebuildMarkers(m);
   $('resetpoints').disabled = !m.history.length;
   if (m.lastBuild) showStats(m, m.lastBuild); else $('stats').innerHTML = '&mdash;';
-  ['dl3mf', 'dlstl', 'dlsep'].forEach(id => $(id).disabled = !m.supportMesh);
+  $('download').disabled = !m.supportMesh;
   paintGenerate();
   renderModelChips();
 
@@ -907,7 +907,7 @@ function clearBuild(m) {
   if (m.sid === state.activeSid) {
     $('resetpoints').disabled = true;
     $('stats').innerHTML = '&mdash;';
-    ['dl3mf', 'dlstl', 'dlsep'].forEach(id => $(id).disabled = true);
+    $('download').disabled = true;
   }
   rebuildMarkers(m);
 }
@@ -1025,7 +1025,7 @@ async function runSupports(m, run) {
   log(`built in ${r.elapsed.toFixed(2)}s`, 'g');
 
   if (m.sid === state.activeSid) {
-    ['dl3mf', 'dlstl', 'dlsep'].forEach(id => $(id).disabled = false);
+    $('download').disabled = false;
   }
 }
 
@@ -1499,17 +1499,29 @@ $('resetpoints').onclick = () => {
   generate();
 };
 
-for (const [id, mode] of [['dl3mf', '3mf'], ['dlstl', 'combined'], ['dlsep', 'separate']]) {
-  $(id).onclick = async () => {
-    const m = active();
-    if (!m) return;
-    // Serverless there is nothing to navigate to: the file is assembled in the
-    // tab and handed over as a blob. `download` hides which of the two it is.
-    try { busy(true); await download(`/api/export/${m.sid}?mode=${mode}`); }
-    catch (err) { log(`export failed: ${err.message}`, 'e'); }
-    finally { busy(false); }
-  };
-}
+$('download').onclick = async () => {
+  const m = active();
+  if (!m) return;
+  const fmt = $('fmt3mf').checked ? '3mf' : 'stl';
+  const separate = $('dlsep').checked;
+  // Serverless there is nothing to navigate to: the file is assembled in the
+  // tab and handed over as a blob. `download` hides which of the two it is.
+  try {
+    busy(true);
+    if (separate) {
+      // Two plain files, not a zip — a browser can balk at saving two files
+      // from one click at once, so the model download always finishes before
+      // the supports one starts.
+      await download(`/api/export/${m.sid}?fmt=${fmt}&separate=true&part=model`);
+      try {
+        await download(`/api/export/${m.sid}?fmt=${fmt}&separate=true&part=supports`);
+      } catch (err) { log(`no supports to export yet: ${err.message}`, 'w'); }
+    } else {
+      await download(`/api/export/${m.sid}?fmt=${fmt}&separate=false`);
+    }
+  } catch (err) { log(`export failed: ${err.message}`, 'e'); }
+  finally { busy(false); }
+};
 
 // ---------------------------------------------------------------- dropping
 
