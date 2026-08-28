@@ -40,6 +40,40 @@ def cone_on_its_base(radius: float = 8.0, height: float = 20.0) -> trimesh.Trime
     return mesh_io.drop_to_bed(trimesh.creation.cone(radius=radius, height=height, sections=48))
 
 
+def tee_with_small_tab(
+    bar_z: float = 15.0, span: float = 16.0, tab_size: float = 0.15
+) -> tuple[trimesh.Trimesh, np.ndarray]:
+    """The `tee` bar plus one tiny, genuinely overhanging tab well off to the
+    side: a small part sitting next to a model whose overhang is otherwise
+    dominated by the bar's much larger underside.
+
+    The tab stands on its own thin stem, flush with the stem's footprint, so
+    it is not a floating island (its cross-section touches the layer below)
+    and gets no forced point - it can only be reached by the overhang-coverage
+    or span-fill passes, exactly the ones that draw from a fixed-size,
+    area-weighted candidate pool.
+
+    Returns:
+        ``(mesh, tab_top_xyz)`` - the tab's own top-facing centroid, the point
+        a caller can measure "was this held?" against.
+    """
+    stem = trimesh.creation.box(extents=[3.0, 3.0, bar_z])
+    stem.apply_translation([0, 0, bar_z * 0.5])
+    bar = trimesh.creation.box(extents=[span, 4.0, 2.0])
+    bar.apply_translation([0, 0, bar_z + 1.0])
+
+    tx, ty = span * 0.5 + 3.0, 0.0
+    tab_stem = trimesh.creation.box(extents=[tab_size, tab_size, 10.0])
+    tab_stem.apply_translation([tx, ty, 5.0])
+    tab = trimesh.creation.box(extents=[tab_size, tab_size, tab_size])
+    tab.apply_translation([tx, ty, 10.0 + tab_size / 2])
+
+    mesh = mesh_io.drop_to_bed(
+        mesh_io.concat(stem, bar, tab_stem, tab), center_xy=False
+    )
+    return mesh, np.array([tx, ty, 10.0])
+
+
 def floating_blob() -> trimesh.Trimesh:
     """A cube in mid-air beside a post — a genuine island, unreachable by
     growing upward from anything below it."""
@@ -165,6 +199,26 @@ def test_nothing_is_left_further_than_the_unsupported_span():
     grid = np.array([[x, y, 15.0] for x in xs for y in ys if abs(x) > 2.0])
     d, _ = cKDTree(pos).query(grid)
     assert d.max() <= PARAMS.max_unsupported_span * 1.5, f"worst stranded point {d.max():.1f} mm"
+
+
+def test_a_small_isolated_overhang_is_not_lost_to_the_odds():
+    """A genuine overhang region much smaller than the model's dominant one
+    must still get a contact point - not "usually", every time.
+
+    `sample_overhang_candidates` draws a fixed budget of points weighted by
+    face area; a tiny isolated region can go the whole draw without a single
+    hit purely by chance, since the bar's underside soaks up nearly all of
+    the budget. That is issue #20: "small overhangs are not always being
+    found." `_guarantee_component_coverage` tops up every connected overhang
+    component the main draw is statistically likely to miss, so this must be
+    deterministic rather than a coin flip.
+    """
+    model, tab_top = tee_with_small_tab()
+    pts = place_points(model, PARAMS)
+
+    pos = positions(pts)
+    d = np.linalg.norm(pos - tab_top, axis=1) if len(pos) else np.array([np.inf])
+    assert d.min() < 1.0, "the small tab's overhang must get its own contact point"
 
 
 def test_tighter_spacing_produces_more_points():
