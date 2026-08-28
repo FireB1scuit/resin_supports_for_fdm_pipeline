@@ -120,6 +120,11 @@ def api_supports(sid: str, req: SupportsRequest) -> dict:
     return _staged(core.run_supports, _get(sid), points=req.points, **req.patch())
 
 
+@app.get("/api/overhang/{sid}")
+def api_overhang(sid: str, angle_deg: float | None = None) -> dict:
+    return _staged(core.overhang_faces, _get(sid), angle_deg)
+
+
 @app.get("/api/mesh/{sid}/{which}")
 def api_mesh(sid: str, which: str) -> Response:
     data = _staged(core.mesh_stl, _get(sid), which)

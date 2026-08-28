@@ -158,6 +158,35 @@ def test_a_wrong_method_is_405(router, stl_bytes):
     assert router.route("GET", f"/api/points/{sid}").status == 405
 
 
+def test_overhang_faces_match_the_served_ones(client, router, stl_bytes):
+    """The overlay is read-only, but it is still one endpoint served two ways —
+    same session-worth of geometry, same overhang mask either front end."""
+    served_sid = client.post(
+        "/api/model", files={"file": ("cube.stl", stl_bytes, "model/stl")}
+    ).json()["id"]
+    local_sid = _upload(router, stl_bytes)
+
+    served = client.get(f"/api/overhang/{served_sid}").json()
+    local = router.route("GET", f"/api/overhang/{local_sid}").data
+    assert local == served
+
+
+def test_overhang_faces_match_the_served_ones_at_an_explicit_angle(client, router, stl_bytes):
+    served_sid = client.post(
+        "/api/model", files={"file": ("cube.stl", stl_bytes, "model/stl")}
+    ).json()["id"]
+    local_sid = _upload(router, stl_bytes)
+
+    served = client.get(f"/api/overhang/{served_sid}?angle_deg=10").json()
+    local = router.route("GET", f"/api/overhang/{local_sid}?angle_deg=10").data
+    assert local == served
+    assert local["angle_deg"] == pytest.approx(10.0)
+
+
+def test_overhang_of_unknown_session_is_404(router):
+    assert router.route("GET", "/api/overhang/nope").status == 404
+
+
 def test_a_setting_this_build_has_never_heard_of_is_reported(router, stl_bytes):
     sid = _upload(router, stl_bytes)
     router.route("POST", f"/api/points/{sid}", body={})

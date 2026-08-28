@@ -35,6 +35,7 @@ __all__ = ["Router", "route"]
 
 _MESH = re.compile(r"^/api/mesh/([^/]+)/([^/]+)$")
 _EXPORT = re.compile(r"^/api/export/([^/]+)$")
+_OVERHANG = re.compile(r"^/api/overhang/([^/]+)$")
 _STAGE = re.compile(r"^/api/(orient|rotate|points|supports)/([^/]+)$")
 
 
@@ -118,6 +119,14 @@ class Router:
             if method != "POST":
                 return Response(405, {"detail": f"{method} not allowed on {path}"})
             return Response(200, self._stage(m.group(1), self.store.get(m.group(2)), body))
+
+        if m := _OVERHANG.match(path):
+            if method != "GET":
+                return Response(405, {"detail": f"{method} not allowed on {path}"})
+            session = self.store.get(m.group(1))
+            angle = query.get("angle_deg")
+            angle_deg = float(angle[0]) if angle else None
+            return Response(200, core.overhang_faces(session, angle_deg))
 
         if m := _MESH.match(path):
             if method != "GET":

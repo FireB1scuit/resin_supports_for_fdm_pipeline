@@ -135,6 +135,44 @@ def test_nothing_is_dropped_when_everything_is_reachable(client, stl_bytes):
     assert body["dropped_points"] == []
 
 
+def test_overhang_faces_flag_only_the_underside_of_a_lifted_box(client, stl_bytes):
+    """A box floats by the default lift, so its whole underside is a 90 degree
+    overhang and nothing else on it is — the clean case worked out on paper,
+    same as `tests/test_overhang.py`'s fixtures do for the pure function this
+    endpoint exposes."""
+    sid = _upload(client, stl_bytes).json()["id"]
+    mesh = _model_mesh(client, sid)
+
+    body = client.get(f"/api/overhang/{sid}").json()
+    assert body["total_faces"] == len(mesh.faces)
+    assert body["angle_deg"] == pytest.approx(DEFAULTS.overhang_angle_deg)
+
+    normals = mesh.face_normals
+    down = {i for i, n in enumerate(normals) if n[2] < -0.9}
+    assert down, "fixture is wrong: a box has a bottom face"
+
+    flagged = set(body["faces"])
+    assert flagged == down, "only the underside of a lifted box should be flagged"
+    assert len(flagged) == len(body["faces"]), "no face reported twice"
+    assert body["area"] == pytest.approx(10.0 * 10.0, rel=1e-6)  # the 10x10 base
+
+
+def test_overhang_faces_honour_an_explicit_angle(client, stl_bytes):
+    """A box's faces are all exactly vertical or exactly straight down, so any
+    angle strictly between 0 and 90 must land on the same partition — this is
+    here to prove the query parameter reaches the endpoint at all, not to
+    re-test the angle math (`tests/test_overhang.py` already does that)."""
+    sid = _upload(client, stl_bytes).json()["id"]
+    default = client.get(f"/api/overhang/{sid}").json()
+    tight = client.get(f"/api/overhang/{sid}?angle_deg=10").json()
+    assert tight["angle_deg"] == pytest.approx(10.0)
+    assert tight["faces"] == default["faces"]
+
+
+def test_overhang_of_unknown_session_is_404(client):
+    assert client.get("/api/overhang/nope").status_code == 404
+
+
 def test_index_page_is_served(client):
     body = client.get("/").text
     assert "resin supports for FDM" in body
