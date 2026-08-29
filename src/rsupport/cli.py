@@ -60,7 +60,27 @@ def _add_param_args(p: argparse.ArgumentParser) -> None:
         "--lean",
         type=float,
         dest="strut_lean_deg",
-        help="how far a strut may lean off vertical (deg)",
+        help="how far a strut may lean off vertical (deg); the shallow angle the "
+        "routing search tries first",
+    )
+    g.add_argument(
+        "--lean-max",
+        type=float,
+        dest="strut_lean_max_deg",
+        help="steepest lean the routing search may escalate to when --lean cannot "
+        "find a route (deg); unset takes the printable limit",
+    )
+    g.add_argument(
+        "--strut-min-length",
+        type=float,
+        dest="shaft_min_length",
+        help="shortest a routed shaft's own length may be (mm); 0 (default) is no floor",
+    )
+    g.add_argument(
+        "--strut-max-length",
+        type=float,
+        dest="shaft_max_length",
+        help="longest a routed shaft's own length may be (mm); unset is no ceiling",
     )
     g.add_argument(
         "--parenting",
@@ -130,6 +150,9 @@ def _params_from_args(args) -> SupportParams:
             "overhang_angle_deg",
             "tip_style",
             "strut_lean_deg",
+            "strut_lean_max_deg",
+            "shaft_min_length",
+            "shaft_max_length",
             "parenting",
             "lift_height",
             "foot_diameter",

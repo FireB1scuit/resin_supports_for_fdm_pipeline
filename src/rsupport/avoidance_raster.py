@@ -94,7 +94,7 @@ from scipy import ndimage
 from shapely.geometry import box
 
 from .overhang import slice_polygons
-from .types import SupportParams, strut_lean
+from .types import SupportParams, strut_lean, strut_lean_range
 
 __all__ = ["RasterAvoidanceField", "RasterRegion"]
 
@@ -250,7 +250,14 @@ class RasterAvoidanceField:
     def __init__(self, mesh, params: SupportParams, top_z: float | None = None):
         self.params = params
         self.pitch = max(float(params.collision_pitch), 1e-3)
-        self.max_move = self.pitch * math.tan(math.radians(strut_lean(params)))
+        # The routing search tries a short list of lean angles, shallowest
+        # first (see `types.strut_lean_range`). `max_move` stays the shallow
+        # one for backward compatibility, and everything that has to be
+        # conservative for *every* angle the search may try — the cell size,
+        # the lattice margin — is sized off the whole list instead.
+        self.leans = strut_lean_range(params)
+        self.max_moves = self.pitch * np.tan(np.radians(self.leans))
+        self.max_move = float(self.max_moves[0])
 
         lo, hi = mesh.bounds
         ceiling = float(hi[2] if top_z is None else max(top_z, lo[2] + self.pitch))
@@ -267,9 +274,11 @@ class RasterAvoidanceField:
         # The first term is what "off the lattice is always standable" costs:
         # the fattest bucket plus its clearance, which is the furthest the model
         # can reach out and block anything. The second is slack for a
-        # nearest-point query landing near the edge. Padding beyond that is
-        # quadratic in wasted cells.
-        margin = (float(self.radii[-1]) + params.xy_clearance) + 2.0 * self.max_move
+        # nearest-point query landing near the edge, sized off the steepest
+        # lean the search may reach for rather than just the default — the
+        # search can ask for a bigger per-layer move than `max_move` alone
+        # would suggest. Padding beyond that is quadratic in wasted cells.
+        margin = (float(self.radii[-1]) + params.xy_clearance) + 2.0 * float(self.max_moves[-1])
         self.bed = box(lo[0] - margin, lo[1] - margin, hi[0] + margin, hi[1] + margin)
 
         cell = self._cell_size(margin, lo, hi)
@@ -289,8 +298,12 @@ class RasterAvoidanceField:
             params.foot_diameter * 0.5 + params.xy_clearance,
         ) + self._slack
 
-        self._reach_cache: dict[int, np.ndarray] = {}
+        self._reach_cache: dict[tuple[int, int], np.ndarray] = {}
         self._build(mesh)
+
+    def max_move_at(self, lean_idx: int) -> float:
+        """How far a strut may travel sideways per layer at this lean bucket."""
+        return float(self.max_moves[int(np.clip(lean_idx, 0, len(self.max_moves) - 1))])
 
     # -- construction ------------------------------------------------------ #
 
@@ -422,14 +435,17 @@ class RasterAvoidanceField:
     def _need(self, bucket: int) -> float:
         return float(self.radii[bucket]) + self.params.xy_clearance + self._slack
 
-    def _reach_stack(self, bucket: int) -> np.ndarray:
-        """The reachability sweep for one radius, computed on first use.
+    def _reach_stack(self, bucket: int, lean_idx: int = 0) -> np.ndarray:
+        """The reachability sweep for one radius and lean, computed on first use.
 
         Most builds only ever ask about a couple of radii — a tip and a shaft —
-        so sweeping all six up front would be paying for four of them twice
-        over: once in time, once in the memory to hold them.
+        and only ever escalate past the shallow default lean for the rare
+        contact the default cannot route, so sweeping every combination up
+        front would be paying for most of them twice over: once in time, once
+        in the memory to hold them.
         """
-        cached = self._reach_cache.get(bucket)
+        key = (int(lean_idx), int(bucket))
+        cached = self._reach_cache.get(key)
         if cached is not None:
             return cached
 
@@ -437,7 +453,7 @@ class RasterAvoidanceField:
         # The transform measures exact Euclidean distance in cells, so this is
         # one layer's travel converted to the same units — neither rounded up
         # (which would claim more lean than a strut has) nor padded down.
-        span_cells = self.max_move / self._lattice.cell
+        span_cells = self.max_move_at(lean_idx) / self._lattice.cell
 
         reach = np.empty_like(free)
         reach[0] = free[0]
@@ -449,7 +465,7 @@ class RasterAvoidanceField:
             grown = ndimage.distance_transform_edt(~prev) <= span_cells
             reach[i] = free[i] & grown
 
-        self._reach_cache[bucket] = reach
+        self._reach_cache[key] = reach
         return reach
 
     # -- lookup ------------------------------------------------------------ #
@@ -470,12 +486,14 @@ class RasterAvoidanceField:
         layer = int(np.clip(layer, 0, self.n_layers - 1))
         return RasterRegion(self._dist[layer] >= self._need(bucket), self._lattice)
 
-    def reach(self, bucket: int, layer: int) -> RasterRegion:
+    def reach(self, bucket: int, layer: int, lean_idx: int = 0) -> RasterRegion:
         layer = int(np.clip(layer, 0, self.n_layers - 1))
-        return RasterRegion(self._reach_stack(bucket)[layer], self._lattice)
+        return RasterRegion(self._reach_stack(bucket, lean_idx)[layer], self._lattice)
 
-    def standable(self, bucket: int, layer: int, to_plate: bool) -> RasterRegion:
-        return self.reach(bucket, layer) if to_plate else self.free(bucket, layer)
+    def standable(
+        self, bucket: int, layer: int, to_plate: bool, lean_idx: int = 0
+    ) -> RasterRegion:
+        return self.reach(bucket, layer, lean_idx) if to_plate else self.free(bucket, layer)
 
     def room(self, xy, layer: int) -> float:
         """Fattest radius anything standing at `xy` on this layer could have.

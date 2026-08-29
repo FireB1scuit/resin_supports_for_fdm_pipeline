@@ -21,6 +21,7 @@ import math
 
 import numpy as np
 import pytest
+import shapely
 import trimesh
 
 from rsupport import mesh_io, presets, sampling
@@ -168,6 +169,112 @@ def test_a_blocked_shaft_leans_around_the_obstruction_and_reaches_the_plate():
     # It came down somewhere else entirely from where it topped out.
     assert float(np.linalg.norm(shaft.base_xy - shaft.xy)) > 1.0
     assert _pierces(shafts, ray) == 0
+
+
+def _deep_notch_bracket(notch_w: float, slab_w: float = 4.0, depth: float = 6.0) -> trimesh.Trimesh:
+    """A C-bracket with a deeper notch than :func:`bracket`'s.
+
+    Same idea — a slab at the bottom of the notch stands between the contact
+    and the plate — but the notch opening is `notch_w` wide instead of a fixed
+    8 mm, so a contact placed near its closed end has to travel further
+    sideways, in the same 8 mm of vertical room (z 4 to 12), to clear the slab
+    on its way down. That is exactly the knob a routing search needs to prove
+    itself against: wide enough and the shallow default lean cannot cover the
+    distance in time, but a steeper, still-printable lean can.
+    """
+    outer = notch_w + slab_w
+    poly = shapely.geometry.Polygon(
+        [
+            (0.0, 0.0),
+            (outer, 0.0),
+            (outer, 16.0),
+            (0.0, 16.0),
+            (0.0, 12.0),
+            (notch_w, 12.0),
+            (notch_w, 4.0),
+            (0.0, 4.0),
+        ]
+    )
+    assert poly.is_valid
+    mesh = trimesh.creation.extrude_polygon(poly, depth)
+    mesh.apply_transform(trimesh.transformations.rotation_matrix(np.pi / 2, [1, 0, 0]))
+    mesh.apply_translation([0.0, depth * 0.5, 0.0])
+    return mesh
+
+
+def test_a_steeper_lean_reaches_a_route_the_shallow_default_cannot():
+    """The angle search from the issue: a contact the shallow lean alone drops
+    is reachable once the search is allowed to try a steeper, still-printable
+    one.
+
+    `strut_lean_deg` is set well below the printable limit here — a shallow
+    15 degrees — to open up a wide, deliberate gap for `strut_lean_max_deg`'s
+    default (the printable limit) to search across. `NOTCH_W` is calibrated
+    (by direct measurement, not by construction) so the shallow angle alone
+    cannot bridge the notch within its 8 mm of vertical room but a steeper one
+    within the same printable band can — reproduced on both collision
+    backends.
+    """
+    NOTCH_W = 12.0
+    SLAB_W = 4.0
+    narrow_default = PARAMS.with_(strut_lean_deg=15.0, printable_overhang_deg=50.0)
+    no_search = narrow_default.with_(strut_lean_max_deg=narrow_default.strut_lean_deg)
+
+    model = mesh_io.drop_to_bed(_deep_notch_bracket(NOTCH_W, SLAB_W))
+    # 1 mm from the notch's closed end — as deep in as the geometry allows.
+    x = (NOTCH_W - 1.0) - (NOTCH_W + SLAB_W) / 2.0
+    point = [down_point(x, 0.0, 12.0)]
+
+    old_shafts, old_dropped, _, _, _ = plan(model, point, no_search)
+    assert not old_shafts and old_dropped, (
+        "the shallow angle alone must fail here, or this scene no longer "
+        "exercises the search this test is checking"
+    )
+
+    shafts, dropped, _, ray, _ = plan(model, point, narrow_default)
+    assert shafts and not dropped, "a steeper lean within the printable band should reach it"
+    shaft = shafts[0]
+    assert not shaft.on_model
+    assert shaft.detours > 0
+    # The whole point: a route found only by leaning further is materially
+    # longer than the vertical drop it replaces.
+    assert shaft.length > shaft.height + 1e-6
+    assert _pierces(shafts, ray) == 0
+
+    build = build_resin(model, point, narrow_default)
+    report = printability_report(build.mesh, narrow_default, model=model, ray=ray, joints=build.joints)
+    assert report["violations"] == 0
+
+
+def test_the_routed_strut_is_bounded_by_shaft_min_and_max_length():
+    """`shaft_min_length` / `shaft_max_length`: the min/max strut range.
+
+    Both are inert by default, so the plain scene supports as it always has.
+    Setting either bound so the natural strut falls outside it refuses the
+    route exactly as if the plate had never been reachable — the same warning
+    path a routing failure takes — and setting both to bracket the natural
+    length changes nothing.
+    """
+    model = mesh_io.drop_to_bed(table(bar_z=10.0))
+    point = [down_point(4.0, 0.0, 10.0)]
+
+    shafts, dropped, _, _, _ = plan(model, point, PARAMS)
+    assert shafts and not dropped
+    natural = shafts[0].length
+    assert natural == pytest.approx(shafts[0].height), "a clear column routes straight down"
+
+    too_short_ceiling = PARAMS.with_(shaft_max_length=natural - 1.0)
+    shafts, dropped, warnings = plan(model, point, too_short_ceiling)[:3]
+    assert not shafts and dropped, "a strut over the max length must be refused, not truncated"
+
+    too_tall_floor = PARAMS.with_(shaft_min_length=natural + 1.0)
+    shafts, dropped, warnings = plan(model, point, too_tall_floor)[:3]
+    assert not shafts and dropped, "a strut under the min length must be refused"
+
+    bracketed = PARAMS.with_(shaft_min_length=natural - 1.0, shaft_max_length=natural + 1.0)
+    shafts, dropped, _, _, _ = plan(model, point, bracketed)
+    assert shafts and not dropped
+    assert shafts[0].length == pytest.approx(natural)
 
 
 def test_a_shaft_with_a_clear_column_still_drops_dead_straight():

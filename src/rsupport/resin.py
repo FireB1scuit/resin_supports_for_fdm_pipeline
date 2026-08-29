@@ -81,7 +81,7 @@ from .supports import (
     rings_on_axis,
     tip_profile,
 )
-from .types import SupportBuild, SupportParams, SupportPoint
+from .types import SupportBuild, SupportParams, SupportPoint, strut_lean_range
 
 __all__ = ["build_resin", "link_angle", "Shaft", "Arm"]
 
@@ -148,6 +148,20 @@ class Shaft:
     @property
     def height(self) -> float:
         return max(0.0, self.top_z - self.land_z)
+
+    @property
+    def length(self) -> float:
+        """Total material length along the axis, base to top.
+
+        Not the same as `height` once a shaft has had to route around
+        something: `height` is the vertical extent, `length` is the actual
+        distance a nozzle travels along the bent path, which is what
+        `shaft_min_length`/`shaft_max_length` bound. On a straight shaft the
+        two are equal.
+        """
+        if len(self.path) < 2:
+            return 0.0
+        return float(np.linalg.norm(np.diff(self.path, axis=0), axis=1).sum())
 
     @property
     def detours(self) -> int:
@@ -545,6 +559,16 @@ def _make_shaft(field: AvoidanceField, ray: DownRay, members, elbows, params: Su
     obstruction. Only when there is genuinely no route down — and only when
     ``params.plate_only`` is off — does the shaft fall back to standing on the
     model.
+
+    Reaching the plate is itself tried at more than one lean. A route that
+    needs more sideways travel than the shallow default allows per layer is
+    not "no route" — it may just need a steeper (still printable) angle, which
+    is a longer, more circuitous strut than the shallow search would ever
+    propose. ``field.leans`` (shallowest first, see ``types.strut_lean_range``)
+    is tried in order and the first successful, in-range route wins, so a
+    tidy shaft is always preferred over a roundabout one and a route is only
+    ever descended at one single, self-consistent angle — never switched
+    mid-descent.
     """
     elbows = np.atleast_2d(np.asarray(elbows, dtype=np.float64))
     start = elbows[:, :2].mean(axis=0)
@@ -558,23 +582,43 @@ def _make_shaft(field: AvoidanceField, ray: DownRay, members, elbows, params: Su
     modes = (True,) if params.plate_only else (True, False)
 
     for to_plate in modes:
-        xy = _settle(field, start, _shaft_top_for(start, elbows, params), bucket, to_plate)
-        if xy is None:
-            continue
-        top_z = _shaft_top_for(xy, elbows, params)
-        if top_z <= 0.0:
-            continue
-
         if to_plate:
-            path = _route_to_plate(field, xy, top_z, bucket)
+            path = None
+            for lean_idx in range(len(field.leans)):
+                top_for = _shaft_top_for(start, elbows, params)
+                xy = _settle(field, start, top_for, bucket, True, lean_idx)
+                if xy is None:
+                    continue
+                top_z = _shaft_top_for(xy, elbows, params)
+                if top_z <= 0.0:
+                    continue
+                candidate = _route_to_plate(field, xy, top_z, bucket, lean_idx)
+                if candidate is None:
+                    continue
+                if not _in_length_range(candidate, params):
+                    # This angle reaches the plate but the strut it needs is
+                    # outside the configured range — try the next, steeper
+                    # angle rather than accepting or giving up outright.
+                    continue
+                path = candidate
+                break
             if path is None:
                 continue
             on_model = False
         else:
+            top_for = _shaft_top_for(start, elbows, params)
+            xy = _settle(field, start, top_for, bucket, False)
+            if xy is None:
+                continue
+            top_z = _shaft_top_for(xy, elbows, params)
+            if top_z <= 0.0:
+                continue
             land_z, on_model, top_z = _drop_shaft(field, ray, xy, top_z, bucket, params)
             if top_z - land_z <= 0.0:
                 continue
             path = np.array([[xy[0], xy[1], land_z], [xy[0], xy[1], top_z]])
+            if not _in_length_range(path, params):
+                continue
 
         shaft = Shaft(path=path, on_model=on_model)
         arms = _fit_arms(field, ray, shaft, members, elbows, params)
@@ -583,6 +627,23 @@ def _make_shaft(field: AvoidanceField, ray: DownRay, members, elbows, params: Su
         shaft.arms = arms
         return shaft
     return None
+
+
+def _in_length_range(path: np.ndarray, params: SupportParams) -> bool:
+    """Does a candidate axis fall inside ``shaft_min_length``/``shaft_max_length``?
+
+    Measured along the actual (possibly bent) axis, the same way
+    :attr:`Shaft.length` is — a routed detour is genuinely longer material
+    than the straight vertical drop, and that is exactly what these two
+    bounds judge. Both are inert by default (0 / None), so a caller that never
+    sets them sees every candidate pass, unchanged from before this existed.
+    """
+    length = float(np.linalg.norm(np.diff(path, axis=0), axis=1).sum()) if len(path) > 1 else 0.0
+    if length < float(params.shaft_min_length) - _EPS:
+        return False
+    if params.shaft_max_length is not None and length > float(params.shaft_max_length) + _EPS:
+        return False
+    return True
 
 
 def _fit_arms(
@@ -649,27 +710,33 @@ def _tip_axis(normal: np.ndarray, params: SupportParams) -> np.ndarray:
     return axis
 
 
-def _settle(field: AvoidanceField, xy, z: float, bucket: int, to_plate: bool = True):
+def _settle(
+    field: AvoidanceField, xy, z: float, bucket: int, to_plate: bool = True, lean_idx: int = 0
+):
     """Nudge a shaft top onto ground it may stand on at this height.
 
     With `to_plate` the ground is the *reachable* set, so settling here is what
     establishes :func:`_route_to_plate`'s precondition; without it, merely the
     collision-free set, which is all a shaft that will end up on the model
     needs.
+
+    `lean_idx` picks which of the field's precomputed lean angles the
+    ``reach`` set (and therefore the settling slack) answers to — see
+    :func:`_make_shaft`, which is the only caller that varies it.
     """
     layer = field.layer_of(z)
-    region = field.standable(bucket, layer, to_plate)
+    region = field.standable(bucket, layer, to_plate, lean_idx)
     if region is None or region.is_empty:
         return None
     if field.contains(region, xy):
         return np.asarray(xy, dtype=np.float64)
     moved = field.nearest(region, xy)
-    if float(np.linalg.norm(moved - xy)) <= field.max_move * 4.0:
+    if float(np.linalg.norm(moved - xy)) <= field.max_move_at(lean_idx) * 4.0:
         return moved
     return None
 
 
-def _route_to_plate(field: AvoidanceField, xy, top_z: float, bucket: int):
+def _route_to_plate(field: AvoidanceField, xy, top_z: float, bucket: int, lean_idx: int = 0):
     """Walk a shaft down to the plate, stepping around the model on the way.
 
     A shaft that finds clear air below it drops dead straight, which is what an
@@ -677,18 +744,24 @@ def _route_to_plate(field: AvoidanceField, xy, top_z: float, bucket: int):
     something is in the way, and rather than stopping on it, the shaft leans
     around it.
 
-    The route is read straight out of the reachability sweep. ``reach[i]`` is
-    every position on layer ``i`` from which the plate is still gettable without
-    entering the model, and it is built as
-    ``free[i] ∩ reach[i-1].buffer(max_move)`` — so a position inside ``reach[i]``
-    is guaranteed to have a position inside ``reach[i-1]`` within one layer's
-    sideways travel of it. Descending is then just: stay put if the layer below
-    still allows it, otherwise slide to the nearest place that does.
+    The route is read straight out of the reachability sweep, at whichever of
+    the field's precomputed lean angles `lean_idx` selects (see
+    :func:`_make_shaft`, which tries them shallowest first and is the only
+    caller that varies it). ``reach[i]`` is every position on layer ``i`` from
+    which the plate is still gettable without entering the model at that lean,
+    and it is built as ``free[i] ∩ reach[i-1].buffer(max_move)`` — so a
+    position inside ``reach[i]`` is guaranteed to have a position inside
+    ``reach[i-1]`` within one layer's sideways travel of it. Descending is
+    then just: stay put if the layer below still allows it, otherwise slide to
+    the nearest place that does.
 
     That guarantee is why this cannot paint itself into a corner and why it
-    needs no search, no backtracking and no heuristic. The precondition is the
-    whole of it: the starting position must already be inside ``reach`` at the
-    top, which is what :func:`_settle` establishes.
+    needs no search, no backtracking and no heuristic *within one descent*.
+    The precondition is the whole of it: the starting position must already be
+    inside ``reach`` at the top, which is what :func:`_settle` establishes —
+    at the same ``lean_idx`` this call uses, since ``reach`` differs by angle.
+    Trying several angles is a search over which whole, self-consistent
+    ``reach`` field to descend, never a search within one.
 
     Returns the axis bottom-to-top as an (N, 3) array, or None if the start was
     not reachable after all.
@@ -700,17 +773,17 @@ def _route_to_plate(field: AvoidanceField, xy, top_z: float, bucket: int):
         top_layer -= 1
 
     cur = np.asarray(xy, dtype=np.float64)
-    if not field.contains(field.reach(bucket, top_layer), cur):
+    if not field.contains(field.reach(bucket, top_layer, lean_idx), cur):
         return None
 
     # Simplifying the buffered region can nudge its boundary out by up to the
     # simplify tolerance, so the nearest reachable point can sit a whisker
     # beyond one layer's travel. Allow for that and no more.
-    slack = field.max_move + max(field.params.nozzle_diameter * 0.25, 1e-3)
+    slack = field.max_move_at(lean_idx) + max(field.params.nozzle_diameter * 0.25, 1e-3)
 
     rows = [(cur[0], cur[1], float(top_z))]
     for layer in range(top_layer - 1, -1, -1):
-        region = field.reach(bucket, layer)
+        region = field.reach(bucket, layer, lean_idx)
         if region is None or region.is_empty:
             return None
         if not field.contains(region, cur):

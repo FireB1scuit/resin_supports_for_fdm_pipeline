@@ -56,7 +56,7 @@ from shapely.geometry import box
 from shapely.ops import nearest_points, unary_union
 
 from .overhang import slice_polygons
-from .types import SupportParams, strut_lean
+from .types import SupportParams, strut_lean, strut_lean_range
 
 __all__ = ["PolygonAvoidanceField", "PolygonRegion"]
 
@@ -119,7 +119,14 @@ class PolygonAvoidanceField:
     def __init__(self, mesh, params: SupportParams, top_z: float | None = None):
         self.params = params
         self.pitch = max(float(params.collision_pitch), 1e-3)
-        self.max_move = self.pitch * math.tan(math.radians(strut_lean(params)))
+        # The routing search tries a short list of lean angles, shallowest
+        # first (see `types.strut_lean_range`). `max_move` stays the shallow
+        # one for backward compatibility — it is the default a caller gets if
+        # it does not know about the search — and `max_moves` holds the whole
+        # list, one entry per angle `reach()` may be asked for by `lean_idx`.
+        self.leans = strut_lean_range(params)
+        self.max_moves = self.pitch * np.tan(np.radians(self.leans))
+        self.max_move = float(self.max_moves[0])
 
         lo, hi = mesh.bounds
         ceiling = float(hi[2] if top_z is None else max(top_z, lo[2] + self.pitch))
@@ -127,13 +134,18 @@ class PolygonAvoidanceField:
         self.heights = np.arange(self.n_layers, dtype=np.float64) * self.pitch
 
         # Struts fan outward as they descend, so the working area has to be
-        # wider than the model by everything they could travel.
-        span = float(ceiling) * math.tan(math.radians(strut_lean(params)))
+        # wider than the model by everything they could travel — sized off
+        # the steepest lean the search may reach for, not just the default.
+        span = float(ceiling) * math.tan(math.radians(float(self.leans[-1])))
         margin = float(np.clip(span + 5.0, 10.0, 80.0))
         self.bed = box(lo[0] - margin, lo[1] - margin, hi[0] + margin, hi[1] + margin)
 
         self.radii = self._radius_buckets()
         self._build(mesh)
+
+    def max_move_at(self, lean_idx: int) -> float:
+        """How far a strut may travel sideways per layer at this lean bucket."""
+        return float(self.max_moves[int(np.clip(lean_idx, 0, len(self.max_moves) - 1))])
 
     # -- construction ------------------------------------------------------ #
 
@@ -166,9 +178,9 @@ class PolygonAvoidanceField:
         # of radius r stand here"; the raw outline answers "how fat may a strut
         # standing here be", which is what a base disc needs — see `room`.
         self._solid = solids
+        self._tol = tol
 
         self._free: list[list] = []
-        self._reach: list[list] = []
         for r in self.radii:
             grow = float(r) + p.xy_clearance
             free = []
@@ -181,17 +193,32 @@ class PolygonAvoidanceField:
                     # smaller than the real one.
                     blocked = solid.buffer(grow + tol, quad_segs=8).simplify(tol)
                     free.append(self.bed.difference(blocked))
-
-            reach = [free[0]]
-            for i in range(1, self.n_layers):
-                # Simplify the grown region, never the intersection: tidying up
-                # afterwards can nudge the boundary back outside `free`, and
-                # then a position judged reachable would in fact be in the model.
-                grown = reach[-1].buffer(self.max_move, quad_segs=4).simplify(tol)
-                reach.append(free[i].intersection(grown))
-
             self._free.append(free)
-            self._reach.append(reach)
+
+        # `reach` depends on which lean the search is trying, and most shafts
+        # never need anything past the shallow default — so it is built once
+        # per (lean, radius) pair, on first use, rather than for every angle
+        # the search could in principle reach for. See `_reach_layers`.
+        self._reach_cache: dict[tuple[int, int], list] = {}
+
+    def _reach_layers(self, lean_idx: int, bucket: int) -> list:
+        key = (int(lean_idx), int(bucket))
+        cached = self._reach_cache.get(key)
+        if cached is not None:
+            return cached
+
+        free = self._free[bucket]
+        max_move = self.max_move_at(lean_idx)
+        reach = [free[0]]
+        for i in range(1, self.n_layers):
+            # Simplify the grown region, never the intersection: tidying up
+            # afterwards can nudge the boundary back outside `free`, and then
+            # a position judged reachable would in fact be in the model.
+            grown = reach[-1].buffer(max_move, quad_segs=4).simplify(self._tol)
+            reach.append(free[i].intersection(grown))
+
+        self._reach_cache[key] = reach
+        return reach
 
     # -- lookup ------------------------------------------------------------ #
 
@@ -210,11 +237,14 @@ class PolygonAvoidanceField:
     def free(self, bucket: int, layer: int) -> "PolygonRegion":
         return PolygonRegion(self._free[bucket][int(np.clip(layer, 0, self.n_layers - 1))])
 
-    def reach(self, bucket: int, layer: int) -> "PolygonRegion":
-        return PolygonRegion(self._reach[bucket][int(np.clip(layer, 0, self.n_layers - 1))])
+    def reach(self, bucket: int, layer: int, lean_idx: int = 0) -> "PolygonRegion":
+        layers = self._reach_layers(lean_idx, bucket)
+        return PolygonRegion(layers[int(np.clip(layer, 0, self.n_layers - 1))])
 
-    def standable(self, bucket: int, layer: int, to_plate: bool) -> "PolygonRegion":
-        return self.reach(bucket, layer) if to_plate else self.free(bucket, layer)
+    def standable(
+        self, bucket: int, layer: int, to_plate: bool, lean_idx: int = 0
+    ) -> "PolygonRegion":
+        return self.reach(bucket, layer, lean_idx) if to_plate else self.free(bucket, layer)
 
     def room(self, xy, layer: int) -> float:
         """Fattest radius anything standing at `xy` on this layer could have.
