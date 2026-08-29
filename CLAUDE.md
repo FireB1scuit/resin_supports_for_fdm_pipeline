@@ -379,12 +379,18 @@ python -m http.server -d dist 8000         # ...served like any other files
 Merging to the **default branch** publishes the bundle to GitHub Pages via
 `.github/workflows/pages.yml` — <https://fireb1scuit.github.io/resin_supports_for_fdm_pipeline/>.
 
-**The default branch is `feat/pipeline-foundation`, not `main`.** There is no `main`
-branch on the remote and never has been; the git rules at the top of this file name one
-that does not exist. Read every "`main`" in them as "the default branch" until the
-branch is actually created and switched to. This matters beyond pedantry: a workflow
-keyed to `main` never fires, which is exactly how the first Pages deploy silently did
-nothing.
+**The default branch is `Master`, not `main`.** There is no `main` branch on the remote
+and never has been; the git rules at the top of this file name one that does not exist.
+Read every "`main`" in them as "the default branch". This matters beyond pedantry: a
+workflow keyed to a branch name that is not the actual default never fires on a normal
+merge, which is exactly how the first Pages deploy silently did nothing — and it
+happened *again* as issue #28, months later, when the default branch was renamed from
+the `feat/pipeline-foundation` this note used to name here to `Master` and nobody
+updated `pages.yml`'s `on: push: branches:` list to match. Every PR after the rename
+merged cleanly, the workflow simply never ran, and GitHub's own branch-source Jekyll
+build had the site to itself for weeks with nothing here to say so. If the default
+branch is ever renamed again, grep the repo for its old name — `pages.yml` is not the
+only place that can quietly go stale this way.
 The workflow gates on `tests/test_build_web.py` and `tests/test_browser.py` before
 deploying, because a mis-built bundle loads fine and then fails every request. It is
 a third *consumer* of `scripts/build_web.py`, never a second copy of what it does —
@@ -430,8 +436,8 @@ tests/test_build_web.py tests/test_browser.py` — and the whole suite the brows
 (`RSUPPORT_AVOIDANCE=raster python -m pytest`; on PowerShell
 `$env:RSUPPORT_AVOIDANCE='raster'; python -m pytest`), because the deployed bundle runs
 the raster backend and nothing else exercises it. To hold a branch next to what is live,
-`git worktree add ../rsfp-default feat/pipeline-foundation` and build that into its own
-directory on another port instead of stashing back and forth.
+`git worktree add ../rsfp-default Master` and build that into its own directory on
+another port instead of stashing back and forth.
 
 **What Pages serves is the app, not the docs — check it, don't assume it.** This is the
 one failure here that a green workflow actively hides, and it has already happened once:
