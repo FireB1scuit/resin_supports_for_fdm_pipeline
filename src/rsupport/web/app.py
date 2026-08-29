@@ -23,13 +23,17 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import core
-from .core import SessionStore, StageError
+from .core import SessionStore, StageError, WorkspaceStore
 
 STATIC = Path(__file__).parent / "static"
 
 #: Kept module-level and named as it was: `tests/test_web.py` builds a fresh
 #: TestClient per test against this one app instance.
 _store = SessionStore()
+#: Workspaces group the sessions a tab has uploaded and remember which one is
+#: active — see `core.Workspace`. A separate store, on purpose: a workspace
+#: and its models are evicted on independent schedules.
+_ws_store = WorkspaceStore()
 
 MAX_SESSIONS = core.MAX_SESSIONS
 
@@ -37,6 +41,13 @@ MAX_SESSIONS = core.MAX_SESSIONS
 def _get(sid: str):
     try:
         return _store.get(sid)
+    except StageError as exc:
+        raise HTTPException(exc.status, exc.detail) from exc
+
+
+def _get_workspace(wid: str):
+    try:
+        return _ws_store.get(wid)
     except StageError as exc:
         raise HTTPException(exc.status, exc.detail) from exc
 
@@ -72,6 +83,10 @@ class PointsRequest(ParamPatch):
 
 class SupportsRequest(ParamPatch):
     points: list[dict] | None = None  # None = use whatever stage 2 produced
+
+
+class ActiveRequest(BaseModel):
+    sid: str
 
 
 # --------------------------------------------------------------------- app
@@ -118,6 +133,35 @@ def api_points(sid: str, req: PointsRequest) -> dict:
 @app.post("/api/supports/{sid}")
 def api_supports(sid: str, req: SupportsRequest) -> dict:
     return _staged(core.run_supports, _get(sid), points=req.points, **req.patch())
+
+
+@app.post("/api/workspace")
+def api_workspace_create() -> dict:
+    workspace = core.create_workspace()
+    _ws_store.put(workspace)
+    return core.workspace_payload(workspace, _store)
+
+
+@app.post("/api/workspace/{wid}/model")
+def api_workspace_model(wid: str, file: UploadFile = File(...)) -> dict:
+    workspace = _get_workspace(wid)
+    data = file.file.read()
+    session = _staged(core.load_model, data, file.filename)
+    _store.put(session)
+    core.add_model(workspace, session, file.filename)
+    return core.workspace_payload(workspace, _store)
+
+
+@app.post("/api/workspace/{wid}/active")
+def api_workspace_active(wid: str, req: ActiveRequest) -> dict:
+    workspace = _get_workspace(wid)
+    _staged(core.set_active, workspace, req.sid)
+    return core.workspace_payload(workspace, _store)
+
+
+@app.get("/api/workspace/{wid}")
+def api_workspace_get(wid: str) -> dict:
+    return core.workspace_payload(_get_workspace(wid), _store)
 
 
 @app.get("/api/overhang/{sid}")

@@ -4,38 +4,119 @@ import { STLLoader } from './STLLoader.js';
 import { api, postJSON, download, isServerless, onProgress, warmUp } from './transport.js';
 
 // ---------------------------------------------------------------- state
+//
+// A tab can hold more than one uploaded model now (see the `models` section
+// below). Everything that used to be a single flat field on `state` — the
+// points, the dial-fed settings, the stale flag, the lift, the meshes — is per
+// model, so it lives on a `ModelEntry` instead: `state.models` holds one per
+// upload, keyed by sid, and `state.activeSid` says which one the *selected*
+// model is. `active()` is that lookup.
+//
+// "Selected" is narrower than it first was, and the line is worth being exact
+// about, because three different things sit on either side of it:
+//
+//   - Selected means the sidebar, the gizmo, and the click gestures. Those
+//     genuinely act on one model, because there is one set of dials and one
+//     pointer.
+//   - The view chips do not. Each is a statement about a layer across the whole
+//     plate — see applyVisibility, which still tells the selected model apart,
+//     but with material rather than visibility.
+//   - Neither does the generate button. One press builds every loaded model,
+//     each from its own `ModelEntry.settings` and to its own staleness — see
+//     generate/runBatch. Every stage function therefore takes the model *and*
+//     the settings to build it with, rather than reaching for `active()` and
+//     the sliders.
 
 const state = {
-  sid: null,
-  points: [],          // [{position:[x,y,z], normal:[..], forced, source}]
-  dropped: new Set(),  // indices into points that stage 3 could not support
-  params: null,        // last params the server reported back
-  presets: null,       // every preset the server knows, by name
-  preset: null,        // params of the preset named in the select, for drift
-  size: null,          // oriented bounding box, mm
-  overhangArea: null,  // mm^2 of flagged downward face
-  volume: null,        // mm^3 enclosed by the scaffold, overlaps counted twice
-  history: [],         // point lists before each hand edit — see undo()
+  workspaceId: null,   // groups every model this tab has uploaded — see core.Workspace
+  models: new Map(),   // sid -> ModelEntry
+  order: [],           // sids in upload order, for the model chips and the layout
+  activeSid: null,      // which model every stage call currently targets
+  presets: null,        // every preset the server knows, by name — shared across models
+  //: The preset the dropdown is currently naming. Shared rather than
+  //: per-model, the same way the printer a preset describes is shared across
+  //: whatever parts get dropped into one tab: choosing "0.6mm nozzle" for one
+  //: model is choosing it for the next upload too, not just for the model on
+  //: screen when the dropdown was touched.
+  presetName: null,
   busy: false,
-  //: What the view no longer answers for, worst case, since the last build:
-  //: null when it is current, otherwise a SCOPES name. Every dial writes this
-  //: instead of starting a run — see markStale.
-  stale: null,
-  //: The lift baked into the model mesh on screen, so a run knows whether the
-  //: mesh has to be fetched again. null means "not known", which is the state
-  //: a fresh upload is in: the session floats the model by its own preset's
-  //: lift and the payload does not say what that was.
-  lift: null,
-  //: A preset the select is naming but no stage has been told about yet. The
-  //: dials cannot carry one on their own — half of what a preset sets (the
-  //: nozzle, the clearances, the printable limit) has no slider — so the name
-  //: rides along with the next placement and is spent there.
-  pendingPreset: null,
+  //: A fixed spacing scheme, not a bin-packing one: each new model's group is
+  //: shifted just far enough clear of the one before it. Good enough to keep
+  //: several test models from overlapping in the viewport; it is a client-side
+  //: display offset only and is never sent to the server, which still only
+  //: ever sees each model in its own local frame (see switchModel/upload).
+  layoutRight: 0,
 };
 
-//: How many hand edits ctrl-Z can walk back. Each entry is a shallow copy of a
-//: point list, so this is bounded memory for an unbounded session.
+const LAYOUT_GAP = 15; // mm between one model's footprint and the next
+
+//: How many hand edits ctrl-Z can walk back, per model.
 const UNDO_DEPTH = 32;
+
+/** Everything the pipeline stages produce for one uploaded model, plus the
+ *  three.js objects that show it. Kept alive for as long as the model is —
+ *  switching the active model never disposes or re-fetches any of this, it
+ *  only changes which entry the rest of the app reads and writes. That is
+ *  what makes "click a model to make it active" cheap: the model you switch
+ *  back to is still exactly as you left it. */
+class ModelEntry {
+  constructor(sid, name, summary) {
+    this.sid = sid;
+    this.name = name;
+    this.summary = summary;
+    //: Its own group so several models can share one scene without their
+    //: geometry landing on top of each other — see layoutRight above. Every
+    //: mesh this model owns is a child of this group and nothing else.
+    this.group = new THREE.Group();
+    world.add(this.group);
+    this.modelMesh = null;
+    this.supportMesh = null;
+    this.overhangMesh = null;   // the checkered overlay — see loadOverhang/buildOverhangOverlay
+    this.markers = [];   // one InstancedMesh per flavour; .userData.at maps back to points
+
+    this.points = [];
+    this.dropped = new Set();
+    this.history = [];
+
+    this.params = null;
+    //: This model's own dial values, in the shape `overrides()` returns.
+    //:
+    //: The sidebar has one set of sliders and there are several models, so the
+    //: panel can only ever be showing one of them — the active one. That makes
+    //: the sidebar the live truth for the active model and a lie about every
+    //: other, which matters the moment one press builds them all: without this
+    //: field the whole plate would quietly be built out of whichever model
+    //: happened to be selected. So the sidebar is copied in here whenever it
+    //: changes or the active model is about to change (see captureSettings),
+    //: and `settingsFor` hands each model its own values back.
+    this.settings = null;
+    this.preset = null;
+    this.pendingPreset = null;
+    this.size = null;
+    this.overhangArea = null;
+    this.volume = null;
+    //: The full stage-3 response from the last successful build, kept so
+    //: switching back onto this model can redraw its stats line without a
+    //: fresh build, and so the plate's totals can include it while some other
+    //: model is selected — see renderStats and switchModel.
+    this.lastBuild = null;
+
+    //: What this model's view no longer answers for, worst case, since its
+    //: last build. Same meaning as the old single-model `state.stale`.
+    this.stale = null;
+    //: The lift baked into this model's mesh on screen — see refloat.
+    this.lift = null;
+    //: The absolute rotation last applied to this model, so switching back to
+    //: it shows the pose it is actually sitting in rather than 0/0/0.
+    this.rotation = { rx: 0, ry: 0, rz: 0 };
+  }
+}
+
+/** The model every existing single-model function currently means by "the"
+ *  model — null before anything has been uploaded. */
+function active() {
+  return state.activeSid ? state.models.get(state.activeSid) : null;
+}
 
 /** Every element this file reaches for is one the page is expected to have, so
  *  a miss is never a case to handle — it means the script and the markup are
@@ -114,7 +195,22 @@ const MAT = {
   // against, and at the old value it was the brightest thing on screen — it
   // competed with the panel text and left the supports nowhere to go.
   model: new THREE.MeshStandardMaterial({ color: 0x7f8794, roughness: 0.72, metalness: 0.04, flatShading: false }),
+  // The other models sitting in the scene while one is active — dim and a
+  // little translucent, so the eye settles on the active model and the
+  // scaffold on it, and the rest read as "there, and clickable" rather than
+  // competing for attention.
+  modelInactive: new THREE.MeshStandardMaterial({
+    color: 0x565c66, roughness: 0.85, metalness: 0.0, transparent: true, opacity: 0.55,
+  }),
   supports: new THREE.MeshStandardMaterial({ color: 0xf2802e, roughness: 0.55, metalness: 0.05 }),
+  // Every model's scaffold is on screen at once now (the view chips are global
+  // — see applyVisibility), so the inactive ones get the same treatment their
+  // models do. Orange is the loudest thing in the scene; three sculpts' worth
+  // of it at full strength would bury the one being worked on, which is the
+  // whole point of the active/inactive distinction.
+  supportsInactive: new THREE.MeshStandardMaterial({
+    color: 0xa85f2a, roughness: 0.7, metalness: 0.0, transparent: true, opacity: 0.5,
+  }),
   // Contact points come in two flavours and the difference has to be readable
   // at a glance. Held ones are washed out on purpose — there are hundreds of
   // them and they are covering the model, so they have to stay out of the way
@@ -130,11 +226,6 @@ const MAT = {
   }),
   pointDropped: new THREE.MeshBasicMaterial({ color: 0xff3b30 }),
 };
-
-let modelMesh = null;
-let supportMesh = null;
-let overhangMesh = null;   // the checkered overlay — see loadOverhang/buildOverhangOverlay
-let markers = [];   // one InstancedMesh per flavour; .userData.at maps back to state.points
 
 const show = { model: true, supports: true, points: false, wire: false, overhang: false };
 
@@ -174,7 +265,7 @@ function log(msg, cls = '') {
   // and "placing support points" is a more useful thing to be told than that
   // the app is busy. Only a run: an upload or an export leaves the button
   // alone, because neither is something the button started.
-  if (active) setWorking(msg);
+  if (activeRun) setWorking(msg);
 }
 
 /** The generate button's label while it is running. The trailing ellipsis the
@@ -207,39 +298,78 @@ function busy(on, heavy = false) {
 
 // ------------------------------------------------------------ geometry io
 
-async function loadSTL(url, kind, signal) {
+async function loadSTL(m, url, kind, signal) {
   const buf = await (await api(url, { signal })).arrayBuffer();
   const geom = loader.parse(buf);
   geom.computeVertexNormals();
 
-  const mesh = new THREE.Mesh(geom, MAT[kind]);
+  const mesh = new THREE.Mesh(geom, kind === 'model' ? MAT.model : MAT.supports);
   if (kind === 'model') {
-    if (modelMesh) { world.remove(modelMesh); modelMesh.geometry.dispose(); }
-    modelMesh = mesh;
+    if (m.modelMesh) { m.group.remove(m.modelMesh); m.modelMesh.geometry.dispose(); }
+    m.modelMesh = mesh;
     // The overlay is built from this geometry's own vertex positions (see
     // buildOverhangOverlay), so a new model mesh strands the old one — face
     // indices from the previous pose mean nothing against this one.
-    clearOverhangOverlay();
+    clearOverhangOverlay(m);
   } else {
-    if (supportMesh) { world.remove(supportMesh); supportMesh.geometry.dispose(); }
-    supportMesh = mesh;
+    if (m.supportMesh) { m.group.remove(m.supportMesh); m.supportMesh.geometry.dispose(); }
+    m.supportMesh = mesh;
   }
-  world.add(mesh);
+  m.group.add(mesh);
   applyVisibility();
   // The overlay is not a build stage and has no scope of its own — it just
   // has to survive the model mesh being replaced out from under it, so it is
   // refetched here rather than left stale until somebody happens to retoggle
   // it.
-  if (kind === 'model' && show.overhang) await loadOverhang(signal);
+  // …and for whichever model this mesh belongs to, active or not: the chip is
+  // global, so a model rebuilt in the middle of a batch owes a fresh overlay
+  // exactly as the selected one does.
+  if (kind === 'model' && show.overhang) await loadOverhang(m, signal);
+  // Same reasoning as the overlay: the gizmo is built off this mesh's own
+  // bounding box (see buildGizmo), so a replaced mesh strands it exactly the
+  // way a replaced pose strands the overlay — refresh it here rather than
+  // leaving it pointing at geometry that no longer exists. This is also what
+  // picks the gizmo back up after a rotation commit's own reload.
+  if (kind === 'model' && m.sid === state.activeSid) refreshGizmo();
   return mesh;
 }
 
-function frameModel() {
-  if (!modelMesh) return;
-  const box = new THREE.Box3().setFromObject(modelMesh);
-  const size = box.getSize(new THREE.Vector3());
+/** How big to draw the bed, given a model that has to fit on it. Separate from
+ *  framing on purpose: a model twice the size of the grid has to make the grid
+ *  bigger whether or not anybody wants the camera moved, and those two used to
+ *  be one function, which is why sizing the bed cost a camera jump. */
+function fitPlate(m) {
+  if (!m?.modelMesh) return;
+  const box = new THREE.Box3().setFromObject(m.modelMesh);
+  const r = Math.max(box.getSize(new THREE.Vector3()).length(), 10);
+  const g = Math.max(60, Math.ceil(r / 20) * 20 * 2);
+  // Only ever outward. Several models share one bed, so sizing it to the model
+  // that happened to arrive last would shrink it back under a bigger one.
+  if (g / 240 > grid.scale.x) {
+    grid.scale.setScalar(g / 240);
+    plate.scale.setScalar(g / 240);
+    axes.scale.setScalar(Math.max(1, g / 240));
+  }
+  // Same rule for the clip planes, and for the same reason: a big model added
+  // to a scene framed on a small one would otherwise be clipped away, and
+  // fixing that by reframing is precisely what this is here to avoid.
+  if (r * 40 > camera.far) { camera.far = r * 40; camera.updateProjectionMatrix(); }
+}
+
+/** Point the camera at this model.
+ *
+ *  Deliberately rare. The camera belongs to whoever is looking through it: a
+ *  view is chosen by orbiting to it, and every automatic reframe throws that
+ *  choice away — which is worst exactly where it used to happen most, on
+ *  selecting another model and on committing a rotation, both of which are
+ *  judged by eye against the view you just set up. So this is called on the
+ *  first model of a session and nowhere else: there is nothing on screen then,
+ *  and no view of it to lose. */
+function frameModel(m) {
+  if (!m?.modelMesh) return;
+  const box = new THREE.Box3().setFromObject(m.modelMesh);
   const center = box.getCenter(new THREE.Vector3());
-  const r = Math.max(size.length(), 10);
+  const r = Math.max(box.getSize(new THREE.Vector3()).length(), 10);
 
   controls.target.copy(center);
   camera.position.copy(center).add(new THREE.Vector3(r * 0.75, -r * 0.95, r * 0.6));
@@ -247,57 +377,100 @@ function frameModel() {
   camera.far = r * 40;
   camera.updateProjectionMatrix();
   controls.update();
-
-  const g = Math.max(60, Math.ceil(r / 20) * 20 * 2);
-  grid.scale.setScalar(g / 240);
-  plate.scale.setScalar(g / 240);
-  axes.scale.setScalar(Math.max(1, g / 240));
+  fitPlate(m);
 }
 
-function rebuildMarkers() {
-  markers.forEach(m => { world.remove(m); m.geometry.dispose(); });
-  markers = [];
-  if (!state.points.length) return;
+/** Where in the scene a freshly uploaded model's group should sit so it does
+ *  not land on top of the ones already there. Purely a display offset — every
+ *  point sent to the server is converted back into the model's own local
+ *  frame first (see the shift-click handler below), so nothing about the
+ *  pipeline ever sees it. The first model is left at its native position, so
+ *  a single-model session looks exactly as it always did. */
+function layoutNewModel(m) {
+  const box = new THREE.Box3().setFromObject(m.modelMesh);
+  if (state.order.length <= 1) {
+    state.layoutRight = box.max.x;
+    return;
+  }
+  const shift = (state.layoutRight + LAYOUT_GAP) - box.min.x;
+  m.group.position.x = shift;
+  state.layoutRight = box.max.x + shift;
+}
+
+function rebuildMarkers(m) {
+  m.markers.forEach(mk => { m.group.remove(mk); mk.geometry.dispose(); });
+  m.markers = [];
+  if (!m.points.length) { applyVisibility(); return; }
 
   // Split by whether stage 3 managed to support the point. Two meshes rather
   // than one with per-instance colours: opacity is a property of the material,
   // and the two flavours differ in it — held contacts are washed out because
   // there are hundreds of them over the surface you are trying to see, unheld
   // ones are solid because there are usually a handful and they are the news.
-  // Each mesh remembers which state.points index every instance came from, so
+  // Each mesh remembers which m.points index every instance came from, so
   // clicking one still deletes the right point.
   const held = [], unheld = [];
-  state.points.forEach((_, i) => (state.dropped.has(i) ? unheld : held).push(i));
+  m.points.forEach((_, i) => (m.dropped.has(i) ? unheld : held).push(i));
 
-  const r = (state.params?.tip_diameter ?? 0.3) * 1.6;
-  const m = new THREE.Matrix4();
+  const r = (m.params?.tip_diameter ?? 0.3) * 1.6;
+  const mat4 = new THREE.Matrix4();
   for (const [idx, mat, scale] of [[held, MAT.point, 1], [unheld, MAT.pointDropped, 1.45]]) {
     if (!idx.length) continue;
     const mesh = new THREE.InstancedMesh(new THREE.SphereGeometry(r * scale, 8, 6), mat, idx.length);
     idx.forEach((pi, i) => {
-      const p = state.points[pi].position;
-      m.makeTranslation(p[0], p[1], p[2]);
-      mesh.setMatrixAt(i, m);
+      const p = m.points[pi].position;
+      mat4.makeTranslation(p[0], p[1], p[2]);
+      mesh.setMatrixAt(i, mat4);
     });
     mesh.instanceMatrix.needsUpdate = true;
     mesh.userData.at = idx;
     // Solid markers draw last, so a dropped point stays visible through the
     // cloud of translucent ones around it.
     mesh.renderOrder = mat === MAT.pointDropped ? 2 : 1;
-    markers.push(mesh);
-    world.add(mesh);
+    m.markers.push(mesh);
+    m.group.add(mesh);
   }
   applyVisibility();
 }
 
+/** Every model's meshes are always in the scene — see ModelEntry — so this is
+ *  the one place that decides what actually shows. Two separate decisions meet
+ *  here and they are deliberately kept apart:
+ *
+ *  *Visibility* is global. A view chip is a statement about a layer — "show me
+ *  the scaffolds", "show me the contact points" — not about one model, and a
+ *  press has to answer it for the whole plate the way a slicer's view toggles
+ *  do. This is what changed: supports, points and the overhang overlay used to
+ *  be gated on `isActive && show.x`, so five of the six chips silently only
+ *  ever described one model.
+ *
+ *  *Material* is not. The active model stays solid and full-strength while the
+ *  rest go dim and translucent, which is how you can tell at a glance which
+ *  one the sidebar dials, the gizmo and a click-to-delete are talking about.
+ *  That distinction stays exactly as it was — it just now applies to a
+ *  scaffold that is on screen rather than one that was hidden. */
 function applyVisibility() {
-  if (modelMesh) {
-    modelMesh.visible = show.model;
-    MAT.model.wireframe = show.wire;
+  for (const m of state.models.values()) {
+    const isActive = m.sid === state.activeSid;
+    if (m.modelMesh) {
+      m.modelMesh.visible = show.model;
+      m.modelMesh.material = isActive ? MAT.model : MAT.modelInactive;
+    }
+    if (m.supportMesh) {
+      m.supportMesh.visible = show.supports;
+      m.supportMesh.material = isActive ? MAT.supports : MAT.supportsInactive;
+    }
+    if (m.overhangMesh) m.overhangMesh.visible = show.overhang;
+    // Contact markers keep one material either way. They are already the most
+    // washed-out thing on screen, and the red unheld ones are news whichever
+    // model they are on — that is a fact about the build, not about which
+    // model happens to be selected.
+    m.markers.forEach(mk => { mk.visible = show.points; });
   }
-  if (supportMesh) supportMesh.visible = show.supports;
-  if (overhangMesh) overhangMesh.visible = show.overhang;
-  markers.forEach(m => { m.visible = show.points; });
+  // Wireframe is a chip like the others, so it has to reach every model — and
+  // that means both model materials, not just the active one's.
+  MAT.model.wireframe = show.wire;
+  MAT.modelInactive.wireframe = show.wire;
 }
 
 // ------------------------------------------------------------- overhang view
@@ -317,24 +490,25 @@ const OVERHANG_CHECK_MM = 0.25;
 const OVERHANG_YELLOW = [0.95, 0.78, 0.05];
 const OVERHANG_BLACK = [0.04, 0.04, 0.04];
 
-function clearOverhangOverlay() {
-  if (!overhangMesh) return;
-  world.remove(overhangMesh);
-  overhangMesh.geometry.dispose();
-  overhangMesh.material.dispose();
-  overhangMesh = null;
+function clearOverhangOverlay(m) {
+  if (!m || !m.overhangMesh) return;
+  m.group.remove(m.overhangMesh);
+  m.overhangMesh.geometry.dispose();
+  m.overhangMesh.material.dispose();
+  m.overhangMesh = null;
 }
 
-/** A hazard checker in world space: each triangle is coloured solid (all
- *  three of its own vertices, not shared with any neighbour) by the parity of
- *  its centroid's cell on a 3D grid. Summing all three axes rather than just
- *  XY keeps the pattern reading as a checker on a steep or vertical face too,
- *  not a set of stripes running the wrong way. */
-function buildOverhangOverlay(faceIndices) {
-  clearOverhangOverlay();
-  if (!modelMesh || !faceIndices || !faceIndices.length) { applyVisibility(); return; }
+/** A hazard checker in the model's own object space (so it moves with that
+ *  model's group like modelMesh and supportMesh do): each triangle is
+ *  coloured solid (all three of its own vertices, not shared with any
+ *  neighbour) by the parity of its centroid's cell on a 3D grid. Summing all
+ *  three axes rather than just XY keeps the pattern reading as a checker on a
+ *  steep or vertical face too, not a set of stripes running the wrong way. */
+function buildOverhangOverlay(m, faceIndices) {
+  clearOverhangOverlay(m);
+  if (!m || !m.modelMesh || !faceIndices || !faceIndices.length) { applyVisibility(); return; }
 
-  const src = modelMesh.geometry.attributes.position;
+  const src = m.modelMesh.geometry.attributes.position;
   const positions = new Float32Array(faceIndices.length * 9);
   const colors = new Float32Array(faceIndices.length * 9);
 
@@ -367,21 +541,34 @@ function buildOverhangOverlay(faceIndices) {
     // two fight for the same pixels and flicker between them.
     polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
   });
-  overhangMesh = new THREE.Mesh(geom, mat);
-  overhangMesh.position.copy(modelMesh.position);
-  world.add(overhangMesh);
+  m.overhangMesh = new THREE.Mesh(geom, mat);
+  m.overhangMesh.position.copy(m.modelMesh.position);
+  m.group.add(m.overhangMesh);
   applyVisibility();
 }
 
-/** Fetch the overhang faces for the pose on screen and rebuild the overlay
- *  from them. Not part of any run: it is its own request, made only when the
- *  toggle asks for one. */
-async function loadOverhang(signal) {
-  if (!state.sid || !modelMesh) return;
+/** Fetch the overhang faces for one model's pose on screen and rebuild its
+ *  overlay from them. Not part of any run: it is its own request, made only
+ *  when the toggle asks for one, or when the mesh it was drawn against is
+ *  replaced.
+ *
+ *  It takes the model rather than reaching for `active()` because the overlay
+ *  is a view layer and the view chips are global — the overlay for a model
+ *  nobody has selected is exactly as much on screen as the active one's, so it
+ *  has to be buildable without making that model active first.
+ *
+ *  The angle comes off the sidebar, which shows the *active* model's dials, so
+ *  a model with its own overhang angle is drawn against the angle currently on
+ *  screen. That is the right answer for a viewer aid: the overlay answers "what
+ *  is steeper than this", and "this" is the number you are looking at. It is
+ *  redrawn from the same slider for every model on every toggle, so they can
+ *  never disagree about which angle they are showing. */
+async function loadOverhang(m, signal) {
+  if (!m || !m.modelMesh) return;
   try {
     const angle = +$('overhang').value;
-    const r = await (await api(`/api/overhang/${state.sid}?angle_deg=${angle}`, { signal })).json();
-    buildOverhangOverlay(r.faces);
+    const r = await (await api(`/api/overhang/${m.sid}?angle_deg=${angle}`, { signal })).json();
+    buildOverhangOverlay(m, r.faces);
   } catch (err) {
     if (err.name === 'AbortError') throw err;
     log(`could not draw the overhang overlay: ${err.message}`, 'e');
@@ -391,15 +578,27 @@ async function loadOverhang(signal) {
   }
 }
 
+/** Build the overlay for every loaded model that has not got one. The chip is
+ *  a statement about the whole plate, so switching it on owes an overlay on
+ *  each model, not just on whichever one happens to be selected. */
+async function loadOverhangAll(signal) {
+  for (const sid of state.order) {
+    const m = state.models.get(sid);
+    if (!m || !m.modelMesh || m.overhangMesh) continue;
+    if (!show.overhang) return;   // a failed fetch turns the chip back off
+    await loadOverhang(m, signal);
+  }
+}
+
 /** The overhang chip's own click handler — everything else on `[data-toggle]`
  *  just flips a visibility flag, but this one has to fetch the first time it
- *  is switched on. */
+ *  is switched on, now for every model rather than one. */
 async function toggleOverhang(btn) {
-  if (!state.sid || state.busy) return;
+  if (!state.order.length || state.busy) return;
   show.overhang = !show.overhang;
   btn.classList.toggle('on', show.overhang);
-  if (show.overhang && !overhangMesh) await loadOverhang();
-  else applyVisibility();
+  if (show.overhang) await loadOverhangAll();
+  applyVisibility();
 }
 
 // ---------------------------------------------------------------- params
@@ -427,6 +626,30 @@ function overrides() {
     join_cone_diameter: +$('cone').value,
     join_cone_height: +$('coneh').value,
   };
+}
+
+/** File the sidebar's current values on the active model. Called from the one
+ *  delegated panel `change` listener, and before anything makes a different
+ *  model active — those are the only two ways the panel and `state.activeSid`
+ *  can come to disagree.
+ *
+ *  This builds nothing and starts no stage: it is bookkeeping, the same kind
+ *  `markStale` does, and the generate button is still the only entry point
+ *  into a run. */
+function captureSettings() {
+  const m = active();
+  if (m) m.settings = overrides();
+}
+
+/** The dial values to build `m` with. The active model's live truth is the
+ *  panel itself, since that is what the user is looking at and has possibly
+ *  just moved; every other model answers with what was filed on it. The
+ *  fallback to the panel is for a model that somehow never had settings
+ *  captured — building it with the visible dials is wrong, but building it
+ *  with nothing is worse. */
+function settingsFor(m) {
+  if (m.sid === state.activeSid) return overrides();
+  return m.settings ?? overrides();
 }
 
 function syncSliders(p) {
@@ -458,6 +681,18 @@ function syncSliders(p) {
   if (p.parenting != null) $('parenting').value = p.parenting;
   showSliderValues();
   markDrift();
+}
+
+/** Put the current model's last-applied rotation into the readout boxes —
+ *  used on upload (0/0/0) and on switching the active model (whatever it was
+ *  left turned to). The gizmo itself is refreshed separately (see
+ *  refreshGizmo below) since it also depends on which model is active and
+ *  whether rotation mode is even on. */
+function syncRotation(m) {
+  $('rotx').value = m.rotation.rx;
+  $('roty').value = m.rotation.ry;
+  $('rotz').value = m.rotation.rz;
+  showRotationValues();
 }
 
 //
@@ -516,7 +751,18 @@ function commitTyped(id) {
   }
   box.value = (+s.value).toFixed(DECIMALS[id]);  // gibberish just reverts
   box.dataset.was = s.value;
-  if (+s.value !== before) s.dispatchEvent(new Event('change'));
+  // `bubbles: true` is load-bearing and was missing. A synthetic Event does not
+  // bubble unless it is told to, and everything a dial change costs — the drift
+  // dots, filing the value on the model, and above all marking the view stale
+  // through DIAL_SCOPE — hangs off one delegated listener on #panel. Without it
+  // a *dragged* slider marked the view out of date and a *typed* value silently
+  // did not: the number went in, the panel showed it, the generate button stayed
+  // looking current, and the next press rebuilt geometry only — so a typed
+  // spacing or lift was quietly ignored until some other dial was dragged. Same
+  // failure the DIAL_SCOPE table was introduced to end, arriving by a different
+  // road. (The rotation boxes are outside #panel and have their own direct
+  // listener, so this changes nothing for them.)
+  if (+s.value !== before) s.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
 function bindValueBox(id) {
@@ -541,6 +787,158 @@ function bindValueBox(id) {
 
 VALUE_IDS.concat(ROTATION_IDS).forEach(bindValueBox);
 
+// -------------------------------------------------------------- gizmo mode
+//
+// Bambu-Studio-style: rotation and movement are viewport gizmos, not sidebar
+// dials. `rotx`/`roty`/`rotz` are still exactly the three absolute-angle
+// values every rotation function already read and wrote (`bindValueBox`
+// above wires their number boxes up); dragging a ring just moves the same
+// values a dragged wheel used to, and still applies on release through the
+// same `rerotate`, still bound to the range's `change` event below. Movement
+// has no value store at all — it is a pure client-side rearrangement of
+// `ModelEntry.group.position.x/y`, the same field `layoutNewModel` already
+// uses to keep freshly uploaded models apart (see its own comment for why
+// that is never sent to the server). The pointer handling for both lives
+// down in the interaction section, alongside the raycaster it shares with
+// click-to-select; this section only builds/tears down the gizmo mesh and
+// keeps it in step with which model is active.
+//
+// Colours: the standard X=red / Y=green / Z=blue axis convention, which is a
+// deliberate, requested exemption from this app's one-hue-one-meaning rule (red
+// otherwise says "nothing could support this"). It is affordable because the
+// gizmo is a transient modal overlay — it only exists while rotation mode is
+// on, and nobody reads a support-colour decision while turning the model. The
+// full reasoning, and the exact hex, live with the mirrored --c-gizmo-* vars in
+// index.html; that is where the exemption is recorded. Do not revert it.
+const GIZMO_COLOR = { x: 0xff0000, y: 0x00d43f, z: 0x3b7bff };
+
+let gizmoMode = null;      // null | 'rotate' | 'move'
+let gizmoGroup = null;     // THREE.Group of the three rings, child of the active model's group
+let gizmoRings = null;     // { x, y, z } visible ring meshes, keyed as ringDrag.axis is
+let gizmoPicks = null;     // { x, y, z } invisible fat proxies — what the pointer actually hits
+let gizmoHover = null;     // which ring the pointer is over right now, or null
+
+function disposeGizmo() {
+  if (!gizmoGroup) return;
+  gizmoGroup.parent?.remove(gizmoGroup);
+  gizmoGroup.traverse((o) => { o.geometry?.dispose(); o.material?.dispose(); });
+  gizmoGroup = null;
+  gizmoRings = null;
+  gizmoPicks = null;
+  gizmoHover = null;
+}
+
+/** Build the three rings on `m`, sized off its own bounding box so the gizmo
+ *  is usable whether the model is 8mm or 300mm — and centred on that box, not
+ *  on the group origin, since a tall model's natural handle is at its own
+ *  middle. Added as a child of `m.group` so it inherits the same layout/move
+ *  offset the model mesh does, and moves with a manual drag for free. */
+function buildGizmo(m) {
+  disposeGizmo();
+  if (!m || !m.modelMesh) return;
+
+  const geom = m.modelMesh.geometry;
+  geom.computeBoundingBox();
+  const box = geom.boundingBox;
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+
+  const radius = Math.max(Math.max(size.x, size.y, size.z) * 0.65, 5);
+  // What the ring *looks* like and what the pointer can *hit* are deliberately
+  // two different thicknesses. A fine ring reads as a precision control and
+  // leaves the model visible through the gizmo, but a fine ring is also a
+  // 3-pixel target, and a rotation handle you have to aim at is worse than an
+  // ugly one. So the visible torus is thin and an invisible fat torus sits on
+  // the same circle as the raycast target — the same trick three.js's own
+  // TransformControls uses. Thinning the look therefore costs nothing in feel.
+  const tube = Math.max(radius * 0.012, 0.07);
+  const pickTube = Math.max(radius * 0.055, 0.45);
+
+  gizmoGroup = new THREE.Group();
+  gizmoGroup.position.copy(center);
+  gizmoGroup.renderOrder = 999;
+  m.group.add(gizmoGroup);
+
+  gizmoRings = {};
+  gizmoPicks = {};
+  // Each ring's hole axis is the axis it turns the model about. A torus is
+  // built with its hole along Z, so X and Y need a quarter turn to stand it
+  // up in the other two planes; Z is already right.
+  const defs = [
+    ['x', GIZMO_COLOR.x, (o) => { o.rotation.y = Math.PI / 2; }],
+    ['y', GIZMO_COLOR.y, (o) => { o.rotation.x = -Math.PI / 2; }],
+    ['z', GIZMO_COLOR.z, () => {}],
+  ];
+  for (const [axis, color, orient] of defs) {
+    const mesh = new THREE.Mesh(
+      // More radial segments than before: at this tube radius the ring is thin
+      // enough that a coarse polygon shows as a visible facet rather than a
+      // circle.
+      new THREE.TorusGeometry(radius, tube, 10, 96),
+      // depthTest off (and a high renderOrder) so the ring stays grabbable
+      // and visible even where it passes through the model, the same reason
+      // Bambu's own gizmo draws in front of the object it is turning.
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: .85, depthTest: false, depthWrite: false }),
+    );
+    orient(mesh);
+    mesh.renderOrder = 999;
+    mesh.userData.axis = axis;
+    gizmoGroup.add(mesh);
+    gizmoRings[axis] = mesh;
+
+    // The hit target. Drawn rather than hidden with `.visible = false` — the
+    // raycaster happens not to consult `visible`, but leaning on that would
+    // make the gizmo silently un-grabbable if it ever did. `colorWrite: false`
+    // with zero opacity puts nothing on screen either way.
+    const pick = new THREE.Mesh(
+      new THREE.TorusGeometry(radius, pickTube, 6, 48),
+      new THREE.MeshBasicMaterial({
+        colorWrite: false, transparent: true, opacity: 0,
+        depthTest: false, depthWrite: false,
+      }),
+    );
+    orient(pick);
+    pick.renderOrder = 999;
+    pick.userData.axis = axis;
+    gizmoGroup.add(pick);
+    gizmoPicks[axis] = pick;
+  }
+}
+
+/** Show or hide the little hover highlight on a ring — the only feedback
+ *  besides the cursor that a drag is about to grab this particular axis. */
+function setGizmoHover(axis) {
+  if (axis === gizmoHover) return;
+  if (gizmoHover && gizmoRings?.[gizmoHover]) gizmoRings[gizmoHover].material.opacity = .85;
+  gizmoHover = axis;
+  if (gizmoHover && gizmoRings?.[gizmoHover]) gizmoRings[gizmoHover].material.opacity = 1;
+}
+
+/** Keep the gizmo (and its readout panel) matching whichever model is active
+ *  and whether rotation mode is even on. Called after every model-mesh
+ *  reload (upload, a rotation commit, a refloat — see loadSTL) and every
+ *  time the active model or the mode itself changes, since none of those
+ *  reliably fire the other two. */
+function refreshGizmo() {
+  const m = active();
+  if (gizmoMode === 'rotate' && m?.modelMesh) buildGizmo(m); else disposeGizmo();
+  $('gizmoPanel').hidden = !(gizmoMode === 'rotate' && m);
+}
+
+/** The two top-left mode buttons — mutually exclusive, Bambu-style: turning
+ *  one on turns the other off. Neither is a `show[]` visibility flag like the
+ *  other viewport chips (see the generic `[data-toggle]` handler below) since
+ *  each has real setup/teardown to do, the same reason `overhang` keeps its
+ *  own handler instead of using that generic one. */
+function setGizmoMode(next) {
+  if (ringDrag) { controls.enabled = true; ringDrag = null; }
+  if (moveDrag) { controls.enabled = true; moveDrag = null; }
+  gizmoMode = gizmoMode === next ? null : next;
+  document.querySelector('[data-toggle="rotatemode"]').classList.toggle('on', gizmoMode === 'rotate');
+  document.querySelector('[data-toggle="movemode"]').classList.toggle('on', gizmoMode === 'move');
+  refreshGizmo();
+}
+
 // ---------------------------------------------------------------- pipeline
 //
 // Nothing here starts on its own. A dial only records that what is on screen no
@@ -554,38 +952,167 @@ VALUE_IDS.concat(ROTATION_IDS).forEach(bindValueBox);
  *  top of a hand-deleted point still re-places the points. */
 const SCOPES = ['geometry', 'points'];
 
-function markStale(scope) {
-  if (state.stale === null || SCOPES.indexOf(scope) > SCOPES.indexOf(state.stale)) {
-    state.stale = scope;
+/** Put `m` out of date by at least `scope`, keeping the worst of what has piled
+ *  up. Staleness is per model — the dials only ever move for the selected one,
+ *  and a press builds each model to whatever it is individually owed. */
+function markStaleOn(m, scope) {
+  if (!m) return;
+  if (m.stale === null || SCOPES.indexOf(scope) > SCOPES.indexOf(m.stale)) {
+    m.stale = scope;
   }
   paintGenerate();
 }
 
+function markStale(scope) { markStaleOn(active(), scope); }
+
+/** The list of model chips in the panel, and the workspace header. Hidden
+ *  until a second model exists — with only one, a strip of one chip is noise
+ *  the sidebar already covers with the filename readout. */
+function renderModelChips() {
+  const box = $('modelChips');
+  box.innerHTML = '';
+  $('modelsSection').hidden = state.order.length < 2;
+  for (const sid of state.order) {
+    const m = state.models.get(sid);
+    if (!m) continue;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'chip' + (sid === state.activeSid ? ' on' : '');
+    btn.textContent = m.name || 'model';
+    btn.title = `switch to ${m.name || 'this model'}`;
+    btn.addEventListener('click', () => switchModel(sid));
+    box.appendChild(btn);
+  }
+}
+
+function filenameText(m) {
+  return `${m.name} — ${m.summary.faces.toLocaleString()} faces, ` +
+    m.summary.size.map(v => v.toFixed(1)).join(' × ') + ' mm';
+}
+
+/** Make a different already-uploaded model the active one.
+ *
+ *  Every pipeline function still only ever knows about "the" active model —
+ *  this is the one place that changes which model that is. Nothing about the
+ *  model being switched to or away from is rebuilt or re-fetched: each one's
+ *  meshes, points and dials have been sitting untouched in its own ModelEntry
+ *  since the last time it was active, so switching back to it shows exactly
+ *  what was left there. */
+async function switchModel(sid) {
+  if (sid === state.activeSid || state.busy) return;
+  const m = state.models.get(sid);
+  if (!m) return;
+  await stopRun();
+
+  // The sidebar is the outgoing model's live settings and is about to start
+  // describing a different model, so file it first or every dial moved since
+  // that model's last build is lost — and worse, silently applied to this one
+  // the next time the plate is built.
+  captureSettings();
+
+  state.activeSid = sid;
+  $('filename').textContent = filenameText(m);
+  $('asloaded').disabled = false;
+  syncRotation(m);
+  // Its own dials. `settings` wins where the two disagree — it is where a dial
+  // moved since the last build lives — but it is laid over `params` rather than
+  // used alone, because half of what syncSliders needs (the printable limit
+  // that sets the link-angle slider's range) has no dial and so is only ever in
+  // params.
+  const view = m.params ? { ...m.params, ...(m.settings || {}) } : m.settings;
+  if (view) syncSliders(view);
+  captureSettings();
+  markDrift();
+  // No reframe. Selecting a model says which one the dials talk to; it does not
+  // say anything about where you were looking from, and moving the camera on a
+  // selection takes away a view somebody had orbited to on purpose. Both models
+  // are on screen at once anyway — the selected one is the solid one.
+  applyVisibility();
+  // Belt and braces. Switching the active model no longer owes anybody an
+  // overlay — the chip builds one on every model when it goes on, and loadSTL
+  // rebuilds one whenever a mesh is replaced — but a model whose fetch failed
+  // once would otherwise stay blank forever with the chip still lit.
+  if (show.overhang) await loadOverhangAll();
+  // The gizmo, if rotation mode is on, is a child of whichever model's group
+  // it was last built for — switching the active model has to move it (or
+  // hide it, if the new active model has no mesh yet).
+  refreshGizmo();
+  rebuildMarkers(m);
+  $('resetpoints').disabled = !m.history.length;
+  renderStats();
+  $('download').disabled = !m.supportMesh;
+  paintGenerate();
+  renderModelChips();
+
+  // Bookkeeping only: every other route already names its model explicitly
+  // by sid, so this changes nothing about the pipeline — it just keeps the
+  // server's own idea of "active" (used only for a future workspace view)
+  // in step with the one the UI is now acting on.
+  if (state.workspaceId) {
+    postJSON(`/api/workspace/${state.workspaceId}/active`, { sid }).catch(() => { /* cosmetic */ });
+  }
+}
+
 async function upload(file) {
   await stopRun();
+  // Same reason as switchModel: the model on the sliders is about to stop being
+  // the model the sliders describe.
+  captureSettings();
   busy(true, true);
+  let m;
   try {
     $('log').innerHTML = '';
     log(`reading ${file.name} …`);
+
+    if (!state.workspaceId) {
+      state.workspaceId = (await (await api('/api/workspace', { method: 'POST' })).json()).id;
+    }
+
     const fd = new FormData();
     fd.append('file', file);
-    const info = await (await api('/api/model', { method: 'POST', body: fd })).json();
+    const ws = await (await api(`/api/workspace/${state.workspaceId}/model`, {
+      method: 'POST', body: fd,
+    })).json();
 
-    state.sid = info.id;
-    state.lift = null;
-    clearBuild();
-    $('filename').textContent = `${info.name} — ${info.summary.faces.toLocaleString()} faces, ` +
-      info.summary.size.map(v => v.toFixed(1)).join(' × ') + ' mm';
-    if (!info.summary.watertight) log('mesh is not watertight; results may be rough', 'w');
+    const sid = ws.active;
+    const info = ws.models.find((x) => x.id === sid);
+    m = new ModelEntry(sid, info.name, info.summary);
+    // Every fresh session starts on the server's own default preset (see
+    // core.load_model), so a model's baseline has to be told the same name
+    // the panel is currently showing — otherwise its own first build would
+    // quietly pick up the server's default nozzle and clearances instead of
+    // whatever preset this tab has actually settled on.
+    m.preset = state.presets?.[state.presetName] ?? null;
+    m.pendingPreset = state.presetName;
+    // A new model starts on whatever the panel is currently showing — the same
+    // values its very first build is about to be sent — so it has its own copy
+    // from the moment it exists rather than borrowing the sidebar until the
+    // first time somebody switches away from it.
+    m.settings = overrides();
+    state.models.set(sid, m);
+    state.order.push(sid);
+    state.activeSid = sid;
+
+    $('filename').textContent = filenameText(m);
+    if (!m.summary.watertight) log('mesh is not watertight; results may be rough', 'w');
     $('drop').classList.add('hide');
     $('asloaded').disabled = false;
-    $('rotx').value = 0; $('roty').value = 0; $('rotz').value = 0;
-    showRotationValues();
+    syncRotation(m);
 
     // The file is taken as posed. It arrives already dropped onto the bed, so
     // there is nothing to decide.
-    await loadSTL(`/api/mesh/${state.sid}/model`, 'model');
-    frameModel();
+    await loadSTL(m, `/api/mesh/${sid}/model`, 'model');
+    layoutNewModel(m);
+    // The first model of a session gets the camera pointed at it: there is
+    // nothing on screen before it, so there is no view to take away, and
+    // opening on an empty stage with the model somewhere off it would be worse.
+    // A second or third model does not — by then somebody has a view they chose
+    // and a bed they can see the new model land on, and yanking the camera onto
+    // each upload is the same jump that selecting a model no longer causes.
+    if (state.order.length === 1) frameModel(m);
+    else fitPlate(m);
+    applyVisibility();
+    renderModelChips();
     log('using the pose from the file', 'g');
   } catch (err) {
     log(`error: ${err.message}`, 'e');
@@ -594,64 +1121,79 @@ async function upload(file) {
   }
   busy(false);
 
-  // The one build nobody has to ask for. There is nothing on the canvas yet, so
-  // there is nothing for a press to be a decision about — and a tool whose whole
-  // output is visual should not open on an empty stage. Every change after this
-  // one waits for the button.
+  // The one build nobody has to ask for. There is nothing shown for this
+  // model yet, so there is nothing for a press to be a decision about — and
+  // a tool whose whole output is visual should not open on an empty stage.
+  // Every change after this one waits for the button.
   markStale('points');
   await generate();
 }
 
-/** Drop the scaffold and the contact points, and everything else that was only
- *  true because of them. They belong to a pose or a model that no longer
+/** Drop this model's scaffold and contact points, and everything else that
+ *  was only true because of them. They belong to a pose that no longer
  *  exists, so leaving them up while the next build is asked for would be
  *  showing the answer to a question nobody is still asking.
  *
  *  The download buttons go with them, and that is not tidiness: re-posing the
  *  model clears the session's supports server-side, so an export taken in this
  *  window is a model and an empty scaffold, written out without complaint. */
-function clearBuild() {
-  if (supportMesh) {
-    world.remove(supportMesh);
-    supportMesh.geometry.dispose();
-    supportMesh = null;
+function clearBuild(m) {
+  if (m.supportMesh) {
+    m.group.remove(m.supportMesh);
+    m.supportMesh.geometry.dispose();
+    m.supportMesh = null;
   }
-  state.points = [];
-  state.dropped = new Set();
-  state.history = [];
-  state.volume = null;
-  $('resetpoints').disabled = true;
-  $('stats').innerHTML = '&mdash;';
-  $('download').disabled = true;
-  rebuildMarkers();
+  m.points = [];
+  m.dropped = new Set();
+  m.history = [];
+  m.volume = null;
+  // Otherwise switching onto this model before it is rebuilt would redraw the
+  // stats line from a build that belongs to the pose just left behind — see
+  // switchModel, which falls back to this whenever there is nothing fresher.
+  m.lastBuild = null;
+  if (m.sid === state.activeSid) {
+    $('resetpoints').disabled = true;
+    $('download').disabled = true;
+  }
+  // Not just this model's line: the plate's totals no longer include it either.
+  renderStats();
+  rebuildMarkers(m);
 }
 
-/** Rotation sliders are absolute, always applied from the file's own pose —
- *  so re-running with all three at 0 is exactly the file's pose. */
-async function runRotate() {
+/** Rotation is absolute, always applied from the file's own pose — so
+ *  re-running with all three at 0 is exactly the file's pose. */
+async function runRotate(m) {
   const rx = +$('rotx').value, ry = +$('roty').value, rz = +$('rotz').value;
   log('rotating the model …');
-  const r = await postJSON(`/api/rotate/${state.sid}`, { rx, ry, rz, overrides: overrides() });
-  await loadSTL(`/api/mesh/${state.sid}/model`, 'model');
-  state.lift = +$('lift').value;
-  frameModel();
+  const r = await postJSON(`/api/rotate/${m.sid}`, { rx, ry, rz, overrides: overrides() });
+  m.rotation = { rx, ry, rz };
+  await loadSTL(m, `/api/mesh/${m.sid}/model`, 'model');
+  m.lift = +$('lift').value;
+  // Deliberately no reframe. A pose is judged by eye against the view you set
+  // up to judge it from, and the gesture that sets it is now a drag on a gizmo
+  // ring in that same viewport — so a camera that lurches on release undoes the
+  // very look the drag was for. The bed is still allowed to grow: a model turned
+  // on its side can need more of it than it did standing up.
+  fitPlate(m);
   log(`rotated (${r.elapsed.toFixed(2)}s)`, 'g');
 }
 
 /** Turning the model is not a build, and it does not wait for the button.
  *
- *  Posing is done by eye — turn it, look, turn it back — and a rotation slider
- *  that moves nothing until a second control is pressed cannot be used that way
- *  at all. So the pose is applied at once and only the scaffold is left out of
- *  date. What was already built came off the old pose and would now be standing
- *  through the model rather than under it, so it goes rather than hanging about
- *  looking like a result. */
+ *  Posing is done by eye — turn it, look, turn it back — and a rotation
+ *  control that moves nothing until a second control is pressed cannot be
+ *  used that way at all. So the pose is applied at once (the wheel commits on
+ *  release, same as the slider it replaced committed on drag-end) and only
+ *  the scaffold is left out of date. What was already built came off the old
+ *  pose and would now be standing through the model rather than under it, so
+ *  it goes rather than hanging about looking like a result. */
 async function rerotate() {
-  if (!state.sid || state.busy) return;
+  const m = active();
+  if (!m || state.busy) return;
   busy(true);
   try {
-    clearBuild();
-    await runRotate();
+    clearBuild(m);
+    await runRotate(m);
     markStale('points');
   } catch (err) {
     log(`error: ${err.message}`, 'e');
@@ -669,71 +1211,97 @@ $('asloaded').onclick = () => {
 };
 
 /** Take a stage-2 result, whoever asked for it. */
-function absorbPoints(r) {
-  state.points = r.points;
-  state.dropped = new Set();
+function absorbPoints(m, r) {
+  m.points = r.points;
+  m.dropped = new Set();
   // A fresh placement is not something ctrl-Z can walk back into: the edits in
   // the stack belong to a point list that no longer exists.
-  state.history = [];
-  state.size = r.size || null;
-  state.overhangArea = r.overhang_area ?? null;
-  $('resetpoints').disabled = true;
-  rebuildMarkers();
-  const forced = state.points.filter(p => p.forced).length;
-  log(`${state.points.length} points (${forced} mandatory) in ${r.elapsed.toFixed(2)}s`, 'g');
+  m.history = [];
+  m.size = r.size || null;
+  m.overhangArea = r.overhang_area ?? null;
+  if (m.sid === state.activeSid) $('resetpoints').disabled = true;
+  rebuildMarkers(m);
+  const forced = m.points.filter(p => p.forced).length;
+  log(stage(`${m.points.length} points (${forced} mandatory) in ${r.elapsed.toFixed(2)}s`), 'g');
 }
 
-async function runPoints(run) {
-  log('placing support points …');
-  const body = { overrides: overrides() };
+async function runPoints(m, ov, run) {
+  log(stage('placing support points …'));
+  const body = { overrides: ov };
   // A preset is a base the dials sit on top of, not a set of dial values: the
   // nozzle, the clearances and the printable limit come with it and have no
   // slider anywhere in the panel. Sending the name is the only way stage 2
-  // hears about those.
-  if (state.pendingPreset) body.preset = state.pendingPreset;
-  const r = await postJSON(`/api/points/${state.sid}`, body, run?.ac.signal);
+  // hears about those. It is per-model — each entry owes whatever preset was
+  // chosen while it was the selected one — so a batch spends each model's own.
+  if (m.pendingPreset) body.preset = m.pendingPreset;
+  const r = await postJSON(`/api/points/${m.sid}`, body, run?.ac.signal);
   halt(run);
   // Only now is the preset spent. A stopped run has not applied it, so it has
   // to still be owed to the next one.
-  state.pendingPreset = null;
-  absorbPoints(r);
+  m.pendingPreset = null;
+  absorbPoints(m, r);
 }
 
 /** Stage 2 is what floats the model, so a lift that has moved leaves the mesh
  *  on screen at the old height — either at the wrong Z outright, or carrying
  *  the local offset previewLift put on it. It is the largest thing on the wire,
- *  so it is fetched again only when one of those is actually true. */
-async function refloat(run) {
-  if (state.lift === +$('lift').value && modelMesh && modelMesh.position.z === 0) return;
-  await loadSTL(`/api/mesh/${state.sid}/model`, 'model', run?.ac.signal);
-  state.lift = +$('lift').value;
+ *  so it is fetched again only when one of those is actually true.
+ *
+ *  The lift compared against is this model's own, out of `ov` — not the slider.
+ *  In a batch the slider is showing the active model's lift while some other
+ *  model is being rebuilt, and reading it here would either skip a fetch the
+ *  model needed or take one it did not. */
+async function refloat(m, ov, run) {
+  if (m.lift === ov.lift_height && m.modelMesh && m.modelMesh.position.z === 0) return;
+  await loadSTL(m, `/api/mesh/${m.sid}/model`, 'model', run?.ac.signal);
+  m.lift = ov.lift_height;
 }
 
-async function runSupports(run) {
-  log('building support geometry …');
-  const r = await postJSON(`/api/supports/${state.sid}`, {
-    overrides: overrides(),
-    points: state.points,
+/** Take what the server made of the values we sent it. It normalises some of
+ *  them — the link angle is clamped into the printable band, for one — so the
+ *  result is the model's settings, not the request. For the active model that
+ *  goes back onto the sliders; for any other it goes quietly into its own
+ *  store, because writing it onto the panel would show one model's dials while
+ *  naming another. */
+function absorbParams(m, params, ov) {
+  m.params = params;
+  if (m.sid === state.activeSid) {
+    syncSliders(params);
+    m.settings = overrides();
+    return;
+  }
+  const next = { ...ov };
+  for (const k of Object.keys(next)) if (params[k] !== undefined) next[k] = params[k];
+  m.settings = next;
+}
+
+async function runSupports(m, ov, run) {
+  log(stage('building support geometry …'));
+  const r = await postJSON(`/api/supports/${m.sid}`, {
+    overrides: ov,
+    points: m.points,
   }, run?.ac.signal);
   halt(run);
-  state.params = r.params;
-  state.dropped = new Set(r.dropped_points || []);
-  syncSliders(r.params);
-  await loadSTL(`/api/mesh/${state.sid}/supports`, 'supports', run?.ac.signal).catch((err) => {
+  m.dropped = new Set(r.dropped_points || []);
+  absorbParams(m, r.params, ov);
+  await loadSTL(m, `/api/mesh/${m.sid}/supports`, 'supports', run?.ac.signal).catch((err) => {
     // A model needing no supports at all answers 404 here, which is not news.
     // A stopped run answers with an abort, which is — it must not be swallowed
     // into "no supports needed", or stopping would look like an empty result.
     if (err.name === 'AbortError') throw err;
-    log('no supports needed', 'g');
+    log(stage('no supports needed'), 'g');
   });
-  rebuildMarkers();
+  rebuildMarkers(m);
 
-  state.volume = r.volume ?? null;
-  showStats(r);
+  m.volume = r.volume ?? null;
+  m.lastBuild = r;
+  renderStats();
   (r.warnings || []).slice(0, 5).forEach(w => log(w, 'w'));
-  log(`built in ${r.elapsed.toFixed(2)}s`, 'g');
+  log(stage(`built in ${r.elapsed.toFixed(2)}s`), 'g');
 
-  $('download').disabled = false;
+  if (m.sid === state.activeSid) {
+    $('download').disabled = false;
+  }
 }
 
 //: g/cm^3. PLA, because that is what an FDM scaffold gets printed in more often
@@ -747,26 +1315,61 @@ const DENSITY = 1.24;
  *  has to reach, it is unaffected by any dial in the panel, and turning the
  *  model is the only thing that meaningfully shrinks it. The mass is deliberately
  *  hedged — the scaffold is exported as overlapping closed shells, so its signed
- *  volume counts every junction twice and the true figure is somewhat under. */
-function showStats(r) {
+ *  volume counts every junction twice and the true figure is somewhat under.
+ *
+ *  Which model's numbers? The active one's, still — every other line in the
+ *  panel describes the selected model and a stats block that quietly averaged
+ *  the plate would be the odd one out. But a press now builds everything, so
+ *  the plate gets a totals line underneath whenever there is more than one
+ *  model: what came out of the press as a whole, which is the number somebody
+ *  about to spend filament on it actually wants. Per-model detail stays where
+ *  it can be attributed; the total stays where it cannot mislead. */
+function statLines(m, r) {
   const bits = [`<b>${r.points}</b> supports &middot; <b>${r.braces}</b> links`,
                 `<b>${r.faces.toLocaleString()}</b> triangles`];
 
-  if (state.size) {
-    bits.push(`<b>${state.size.map(v => v.toFixed(1)).join(' × ')}</b> mm`);
+  if (m.size) {
+    bits.push(`<b>${m.size.map(v => v.toFixed(1)).join(' × ')}</b> mm`);
   }
-  if (state.overhangArea != null) {
-    bits.push(`<b>${(state.overhangArea / 100).toFixed(1)}</b> cm&sup2; overhang`);
+  if (m.overhangArea != null) {
+    bits.push(`<b>${(m.overhangArea / 100).toFixed(1)}</b> cm&sup2; overhang`);
   }
-  if (state.volume) {
-    const grams = (state.volume / 1000) * DENSITY;
+  if (m.volume) {
+    const grams = (m.volume / 1000) * DENSITY;
     bits.push(`under <b>${grams.toFixed(1)}</b> g of support`);
   }
   if (r.dropped) {
     bits.push(`<span style="color:var(--err)"><b>${r.dropped}</b> unsupported ` +
               `&mdash; shown in solid red</span>`);
   }
-  $('stats').innerHTML = bits.join('<br>');
+  return bits;
+}
+
+/** Everything the stats block says: the active model's own figures, plus the
+ *  plate's totals once there is more than one model to total. Called after
+ *  every build and on every model switch, so it never has to be kept in step
+ *  with anything by hand. */
+function renderStats() {
+  const m = active();
+  const bits = m?.lastBuild ? statLines(m, m.lastBuild) : [];
+
+  // The `.all` span is a block with a rule over it, so it is appended rather
+  // than joined — a <br> in front of it would show as a second gap.
+  let html = bits.join('<br>');
+
+  const built = state.order.map(sid => state.models.get(sid)).filter(x => x?.lastBuild);
+  if (state.order.length > 1 && built.length) {
+    const sum = (f) => built.reduce((t, x) => t + (f(x) || 0), 0);
+    const grams = (sum(x => x.volume) / 1000) * DENSITY;
+    const dropped = sum(x => x.lastBuild.dropped);
+    let line = `<span class="all">${built.length} of ${state.order.length} models built &middot; ` +
+      `<b>${sum(x => x.lastBuild.points)}</b> supports &middot; ` +
+      `<b>${sum(x => x.lastBuild.faces).toLocaleString()}</b> triangles`;
+    if (grams > 0) line += ` &middot; under <b>${grams.toFixed(1)}</b> g`;
+    if (dropped) line += ` &middot; <b>${dropped}</b> unsupported`;
+    html += line + '</span>';
+  }
+  $('stats').innerHTML = html || '&mdash;';
 }
 
 /** The lift is a translation in Z and nothing else, so the mesh on screen can
@@ -776,12 +1379,13 @@ function showStats(r) {
  *  is exactly what out of date looks like. The next build fetches the properly
  *  floated mesh back and the offset goes with it — see refloat. */
 function previewLift() {
-  if (modelMesh && state.lift !== null) {
-    modelMesh.position.z = +$('lift').value - state.lift;
+  const m = active();
+  if (m?.modelMesh && m.lift !== null) {
+    m.modelMesh.position.z = +$('lift').value - m.lift;
     // The overlay is drawn in the model's own object space and has no lift
     // logic of its own — it just has to ride along, or it visibly separates
     // from the surface it is supposed to be painted on.
-    if (overhangMesh) overhangMesh.position.z = modelMesh.position.z;
+    if (m.overhangMesh) m.overhangMesh.position.z = m.modelMesh.position.z;
   }
 }
 
@@ -810,45 +1414,118 @@ function previewLift() {
 
 class Stopped extends Error {}
 
-let active = null;    // the run in flight, or null
+let activeRun = null; // the run in flight, or null
 let running = null;   // its promise, for anyone who has to wait for it to let go
+
+//: Which model of how many a batch is on, as a prefix for every stage message
+//: it logs — "model 2 of 3: placing support points …". Empty for a single
+//: model, so a one-model session reads exactly as it always did. Without it a
+//: three-model press logs the same three lines three times and the button says
+//: nothing about progress, which is indistinguishable from a hang.
+let batchLabel = '';
+
+/** Tag a stage message with which model of the batch it belongs to. */
+function stage(msg) { return batchLabel ? `${batchLabel}: ${msg}` : msg; }
 
 function halt(run) { if (run?.stop) throw new Stopped(); }
 
-/** The button. A press builds; a press while it is building stops the build. */
-function generate() {
-  if (active) return stopRun();
-  if (!state.sid || state.busy) return Promise.resolve();
+/** How far back *this* model's next build has to start, or null if it is
+ *  already current. A model that has never been built is never current, however
+ *  clean its stale flag looks: there is nothing on screen for it yet. */
+function pendingScope(m) {
+  if (m.stale !== null) return m.stale;
+  return m.lastBuild ? null : 'points';
+}
 
-  // A press with nothing out of date rebuilds the scaffold anyway. It is a
+/** The button. A press builds; a press while it is building stops the build.
+ *
+ *  A press builds *every* model on the plate, not the selected one: several
+ *  models is one print, and a per-model generate button would mean pressing it
+ *  once per model and remembering which ones you had done. Each model is built
+ *  from its own settings and to its own staleness, so this is a batch of
+ *  individual builds rather than one build of everything — see runBatch. */
+function generate() {
+  if (activeRun) return stopRun();
+  if (!state.order.length || state.busy) return Promise.resolve();
+
+  //: The batch, decided once, up front. Deciding it here rather than as it goes
+  //: is what makes "model 2 of 3" a true statement, and it means a dial moved
+  //: while the batch runs marks its model stale for the *next* press instead of
+  //: silently joining this one.
+  const models = state.order.map(sid => state.models.get(sid)).filter(Boolean);
+  let jobs = models.map(m => ({ m, scope: pendingScope(m) })).filter(j => j.scope);
+  // A press with nothing out of date rebuilds the scaffolds anyway. It is a
   // second or two, it is what was asked for, and a button that ignores a press
-  // is indistinguishable from a broken one.
-  const scope = state.stale ?? 'geometry';
-  active = { stop: false, ac: new AbortController() };
-  running = runAll(scope, active);
+  // is indistinguishable from a broken one. That applies to the whole plate now:
+  // pressing it means "build what is here", and building only some of it would
+  // be a quieter version of the same confusion.
+  if (!jobs.length) jobs = models.map(m => ({ m, scope: 'geometry' }));
+
+  activeRun = { stop: false, ac: new AbortController() };
+  running = runBatch(jobs, activeRun);
   return running;
 }
 
-async function runAll(scope, run) {
-  state.stale = null;
+/** One model, from `scope` forward. Its stale flag is cleared at the top rather
+ *  than at the bottom on purpose: a dial moved while this model is building has
+ *  to survive into the next press, and clearing on success would eat it. */
+async function runOne(m, scope, run) {
+  m.stale = null;
+  //: Read once, at the top of this model's turn, rather than per stage: stage 2
+  //: and stage 3 must be told the same numbers, and for the active model the
+  //: source is a live sidebar somebody could be dragging.
+  const ov = settingsFor(m);
+  if (m.sid === state.activeSid) m.settings = ov;
+  if (scope !== 'geometry') {
+    await runPoints(m, ov, run);
+    halt(run);
+    await refloat(m, ov, run);
+    halt(run);
+  }
+  await runSupports(m, ov, run);
+}
+
+/** Work through the batch a model at a time.
+ *
+ *  Sequential, not parallel: both front ends are one pipeline behind one
+ *  session store, and the serverless one is a single-threaded interpreter in a
+ *  worker — firing three builds at once would queue them anyway, with no way to
+ *  say which one the button is waiting on.
+ *
+ *  What a stopped batch leaves behind is the part worth being precise about.
+ *  Models already finished keep their fresh scaffold and are current; the model
+ *  that was interrupted and every model the batch never reached are put back to
+ *  the scope they were owed, so the button lights up stale and the next press
+ *  picks them up exactly where this one left off. Nothing is half-applied: a
+ *  stage that did not return applies nothing, same as it always did. */
+async function runBatch(jobs, run) {
   busy(true);
   setWorking('working');
+  const many = jobs.length > 1;
+  let at = 0;
   try {
-    if (scope !== 'geometry') {
-      await runPoints(run);
+    for (; at < jobs.length; at++) {
       halt(run);
-      await refloat(run);
-      halt(run);
+      const { m, scope } = jobs[at];
+      batchLabel = many ? `model ${at + 1} of ${jobs.length}` : '';
+      // Which file, once, at the top of its turn — the per-stage lines below
+      // carry only the counter, which is what fits on the button.
+      if (many) log(`${batchLabel}: ${m.name}`);
+      await runOne(m, scope, run);
     }
-    await runSupports(run);
   } catch (err) {
-    // Whatever did not finish leaves the view where it already was: out of
-    // date, and now saying so again.
-    markStale(scope);
-    if (err instanceof Stopped || err.name === 'AbortError') log('stopped', 'w');
-    else log(`error: ${err.message}`, 'e');
+    // Whatever did not finish leaves that model's view where it already was:
+    // out of date, and now saying so again. So does everything after it — the
+    // press that was going to build them never got there.
+    for (let i = at; i < jobs.length; i++) markStaleOn(jobs[i].m, jobs[i].scope);
+    if (err instanceof Stopped || err.name === 'AbortError') {
+      log(many ? `stopped — ${at} of ${jobs.length} models built` : 'stopped', 'w');
+    } else {
+      log(`error: ${err.message}`, 'e');
+    }
   } finally {
-    active = null;
+    batchLabel = '';
+    activeRun = null;
     running = null;
     busy(false);
   }
@@ -858,10 +1535,10 @@ async function runAll(scope, run) {
  *  over when this returns — see the note above — so the button goes on saying
  *  what it is doing until it is. */
 function stopRun() {
-  if (!active) return Promise.resolve();
-  if (!active.stop) {
-    active.stop = true;
-    active.ac.abort();
+  if (!activeRun) return Promise.resolve();
+  if (!activeRun.stop) {
+    activeRun.stop = true;
+    activeRun.ac.abort();
     log('stopping …', 'w');
     setWorking('stopping');
     paintGenerate();
@@ -869,7 +1546,7 @@ function stopRun() {
   return running ?? Promise.resolve();
 }
 
-const TIP_IDLE = 'Generate the supports using this button';
+const TIP_IDLE = 'Generate the supports for every model using this button';
 const TIP_RUNNING = 'click to stop support generating';
 const TIP_STOPPING = 'stopping — the stage already running has to finish';
 
@@ -878,11 +1555,16 @@ const TIP_STOPPING = 'stopping — the stage already running has to finish';
  *  the two things a press would do. */
 function paintGenerate() {
   const b = $('generate');
-  b.disabled = !state.sid || (state.busy && !active) || !!active?.stop;
-  b.classList.toggle('running', !!active);
-  b.classList.toggle('stale', !active && state.stale !== null);
-  if (!active) $('genlabel').textContent = 'generate';
-  $('gentip').textContent = active ? (active.stop ? TIP_STOPPING : TIP_RUNNING) : TIP_IDLE;
+  // Any model, not the selected one: a press builds the plate, so the button is
+  // out of date the moment *anything* on it is. A model whose dials were moved
+  // and which was then switched away from would otherwise leave the button
+  // looking current while a press would visibly rebuild it.
+  const anyStale = [...state.models.values()].some(m => pendingScope(m) !== null);
+  b.disabled = !state.order.length || (state.busy && !activeRun) || !!activeRun?.stop;
+  b.classList.toggle('running', !!activeRun);
+  b.classList.toggle('stale', !activeRun && anyStale);
+  if (!activeRun) $('genlabel').textContent = 'generate';
+  $('gentip').textContent = activeRun ? (activeRun.stop ? TIP_STOPPING : TIP_RUNNING) : TIP_IDLE;
 }
 
 $('generate').addEventListener('click', generate);
@@ -988,18 +1670,24 @@ addEventListener('resize', hideHelp);
 // force a whole fresh placement. Every hand edit now files the list it started
 // from, and ctrl-Z walks back through them.
 //
-function pushHistory() {
-  state.history.push(state.points.slice());
-  if (state.history.length > UNDO_DEPTH) state.history.shift();
-  $('resetpoints').disabled = false;
+// A plain click that lands on a model other than the active one does neither
+// of those — it switches which model is active, the viewport equivalent of
+// the model chips in the panel. Shift-click and marker deletion still only
+// ever act on the active model's own mesh and markers.
+//
+function pushHistory(m) {
+  m.history.push(m.points.slice());
+  if (m.history.length > UNDO_DEPTH) m.history.shift();
+  if (m.sid === state.activeSid) $('resetpoints').disabled = false;
 }
 
 function undo() {
-  if (!state.sid || state.busy || !state.history.length) return;
-  state.points = state.history.pop();
-  state.dropped = new Set();
-  rebuildMarkers();
-  log(`undone — ${state.points.length} points`);
+  const m = active();
+  if (!m || state.busy || !m.history.length) return;
+  m.points = m.history.pop();
+  m.dropped = new Set();
+  rebuildMarkers(m);
+  log(`undone — ${m.points.length} points`);
   markStale('geometry');
 }
 
@@ -1018,49 +1706,259 @@ const raycaster = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
 let downAt = null;
 
-renderer.domElement.addEventListener('pointerdown', (e) => { downAt = { x: e.clientX, y: e.clientY }; });
-
-renderer.domElement.addEventListener('pointerup', (e) => {
-  // Ignore the pointerup that ends an orbit drag.
-  if (!downAt || Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 4) return;
-  if (!state.sid || state.busy) return;
-
+function setNdcFromEvent(e) {
   const rect = renderer.domElement.getBoundingClientRect();
   ndc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
   ndc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+}
+
+// -------------------------------------------------------- gizmo dragging
+//
+// Both gizmo drags take over the gesture from OrbitControls: `controls`
+// checks `enabled` at the top of its own pointermove handler (see
+// OrbitControls.js), so switching it off here — even though OrbitControls'
+// own pointerdown listener, registered first, already ran by the time this
+// one does — still stops it before the camera actually moves on the very
+// next move event. Both drags end the same way a dragged wheel ended: the
+// range's `change` event still applies the rotation exactly once, on
+// release, through `rerotate` below — nothing about that commit path
+// changed, only what moves the value.
+
+let ringDrag = null; // { axis, plane, pivot, u, v, startValue, prevAngle, accumDeg }
+let moveDrag = null; // { m, plane, start: Vector3, startX, startY }
+
+function axisVector(axis) {
+  return axis === 'x' ? new THREE.Vector3(1, 0, 0)
+       : axis === 'y' ? new THREE.Vector3(0, 1, 0)
+       :                 new THREE.Vector3(0, 0, 1);
+}
+
+/** Two vectors spanning the plane perpendicular to `axis` — an arbitrary but
+ *  fixed frame for measuring an angle in that plane. Only the *change* in
+ *  that angle over a drag is ever used, so which direction reads as zero
+ *  never matters. */
+function planeBasis(axis) {
+  const arbitrary = Math.abs(axis.y) < 0.99 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+  const u = new THREE.Vector3().crossVectors(arbitrary, axis).normalize();
+  const v = new THREE.Vector3().crossVectors(axis, u).normalize();
+  return [u, v];
+}
+
+function angleInPlane(point, pivot, u, v) {
+  const rel = point.clone().sub(pivot);
+  return THREE.MathUtils.radToDeg(Math.atan2(rel.dot(v), rel.dot(u)));
+}
+
+/** `a - b`, wrapped into (-180, 180] — so a drag that sweeps past ±180° reads
+ *  as a small step in the right direction instead of a 360° jump. */
+function shortestDelta(a, b) {
+  return (((a - b + 180) % 360) + 360) % 360 - 180;
+}
+
+/** Rotate `m`'s mesh by `deg` about `axis`, pivoting on `pivot` (in the
+ *  model's own group-local space — the gizmo's own centre, see buildGizmo)
+ *  rather than the mesh's local origin, which is the plate, not the model's
+ *  middle. This is a preview only: the mesh this is applied to is discarded
+ *  and replaced wholesale the moment the commit's fresh geometry arrives (see
+ *  loadSTL), so there is nothing to reset it back out of afterwards. */
+function previewRotation(m, axis, pivot, deg) {
+  const q = new THREE.Quaternion().setFromAxisAngle(axis, THREE.MathUtils.degToRad(deg));
+  const rotatedPivot = pivot.clone().applyQuaternion(q);
+  m.modelMesh.position.copy(pivot).sub(rotatedPivot);
+  m.modelMesh.quaternion.copy(q);
+  if (m.overhangMesh) {
+    m.overhangMesh.position.copy(m.modelMesh.position);
+    m.overhangMesh.quaternion.copy(q);
+  }
+}
+
+function startRingDrag(mesh, e) {
+  const m = active();
+  if (!m || !gizmoGroup) return;
+  const axisName = mesh.userData.axis;
+  const axis = axisVector(axisName);
+  const pivot = gizmoGroup.getWorldPosition(new THREE.Vector3());
+  const [u, v] = planeBasis(axis);
+  const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(axis, pivot);
+  const hitPoint = new THREE.Vector3();
+  if (!raycaster.ray.intersectPlane(plane, hitPoint)) return;
+  const startAngle = angleInPlane(hitPoint, pivot, u, v);
+  ringDrag = {
+    axis: axisName, plane, pivot, u, v,
+    startValue: +$('rot' + axisName).value,
+    prevAngle: startAngle,
+    accumDeg: 0,
+    m, localPivot: gizmoGroup.position.clone(),
+  };
+  controls.enabled = false;
+  try { renderer.domElement.setPointerCapture(e.pointerId); } catch { /* already gone */ }
+}
+
+function updateRingDrag(e) {
+  setNdcFromEvent(e);
+  raycaster.setFromCamera(ndc, camera);
+  const hitPoint = new THREE.Vector3();
+  if (!raycaster.ray.intersectPlane(ringDrag.plane, hitPoint)) return;
+  const angle = angleInPlane(hitPoint, ringDrag.pivot, ringDrag.u, ringDrag.v);
+  ringDrag.accumDeg += shortestDelta(angle, ringDrag.prevAngle);
+  ringDrag.prevAngle = angle;
+  // Whole degrees, same as the old wheel's own Math.round — the box shows no
+  // decimals (see DECIMALS.rotx) and the range's own step is 1. Rounding here
+  // rather than leaving it to `endRingDrag`'s step reset matters: a browser
+  // re-clamps a range's *current* value to its step the moment `.step`
+  // changes, so a small, still-fractional drag would otherwise silently snap
+  // to 0 on release instead of committing the whole-degree turn it was.
+  const value = Math.max(-180, Math.min(180, Math.round(ringDrag.startValue + ringDrag.accumDeg)));
+  const s = $('rot' + ringDrag.axis);
+  s.step = 'any';
+  s.value = value;
+  s.dispatchEvent(new Event('input')); // keeps the readout box in step, same as the old wheel
+  previewRotation(ringDrag.m, axisVector(ringDrag.axis), ringDrag.localPivot, value - ringDrag.startValue);
+}
+
+function endRingDrag() {
+  const s = $('rot' + ringDrag.axis);
+  s.step = s.dataset.step;
+  controls.enabled = true;
+  ringDrag = null;
+  // Applies on release, same as letting go of the old wheel — rotation is
+  // one of the two dials that acts at once rather than waiting for the
+  // generate button (see the note above `rerotate`).
+  s.dispatchEvent(new Event('change'));
+}
+
+/** Movement mode has no gizmo mesh at all — dragging the model's own surface
+ *  is the whole control, the same direct-body drag Bambu Studio itself
+ *  supports. The drag plane is simply world Z=0: only the XY component of
+ *  where it crosses that plane is ever read, so which Z it sits at makes no
+ *  difference to the result. */
+function startMoveDrag(m, e) {
+  const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+  const start = new THREE.Vector3();
+  if (!raycaster.ray.intersectPlane(plane, start)) return;
+  moveDrag = { m, plane, start, startX: m.group.position.x, startY: m.group.position.y };
+  controls.enabled = false;
+  try { renderer.domElement.setPointerCapture(e.pointerId); } catch { /* already gone */ }
+}
+
+function updateMoveDrag(e) {
+  setNdcFromEvent(e);
+  raycaster.setFromCamera(ndc, camera);
+  const point = new THREE.Vector3();
+  if (!raycaster.ray.intersectPlane(moveDrag.plane, point)) return;
+  // Overrides layoutNewModel's automatic spacing outright, same as it says
+  // it would — there is nothing to reconcile, the group position is just
+  // whichever of the two touched it last.
+  moveDrag.m.group.position.x = moveDrag.startX + (point.x - moveDrag.start.x);
+  moveDrag.m.group.position.y = moveDrag.startY + (point.y - moveDrag.start.y);
+  // Z is never touched — lift_height on the panel is the only thing that
+  // governs it, per CLAUDE.md.
+}
+
+function endMoveDrag() {
+  controls.enabled = true;
+  moveDrag = null;
+}
+
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  downAt = { x: e.clientX, y: e.clientY };
+  if (state.busy) return;
+  const m = active();
+  if (!m) return;
+  setNdcFromEvent(e);
   raycaster.setFromCamera(ndc, camera);
 
-  if (e.shiftKey && modelMesh) {
-    const hit = raycaster.intersectObject(modelMesh, false)[0];
+  if (gizmoMode === 'rotate' && gizmoPicks) {
+    const hit = raycaster.intersectObjects(Object.values(gizmoPicks), false)[0];
+    if (hit) { startRingDrag(hit.object, e); e.preventDefault(); return; }
+  }
+  if (gizmoMode === 'move' && m.modelMesh) {
+    const hit = raycaster.intersectObject(m.modelMesh, false)[0];
+    if (hit) { startMoveDrag(m, e); e.preventDefault(); return; }
+  }
+});
+
+renderer.domElement.addEventListener('pointermove', (e) => {
+  if (ringDrag) { updateRingDrag(e); return; }
+  if (moveDrag) { updateMoveDrag(e); return; }
+  // Idle hover: which ring, if any, would a click grab right now — the only
+  // feedback besides the cursor that a ring is about to be draggable.
+  if (gizmoMode === 'rotate' && gizmoPicks) {
+    setNdcFromEvent(e);
+    raycaster.setFromCamera(ndc, camera);
+    const hit = raycaster.intersectObjects(Object.values(gizmoPicks), false)[0];
+    setGizmoHover(hit ? hit.object.userData.axis : null);
+  }
+});
+
+renderer.domElement.addEventListener('pointerup', (e) => {
+  if (ringDrag) { endRingDrag(); downAt = null; return; }
+  if (moveDrag) { endMoveDrag(); downAt = null; return; }
+  // Ignore the pointerup that ends an orbit drag.
+  if (!downAt || Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 4) return;
+  if (state.busy) return;
+  const m = active();
+  if (!m) return;
+
+  setNdcFromEvent(e);
+  raycaster.setFromCamera(ndc, camera);
+
+  if (e.shiftKey) {
+    if (!m.modelMesh) return;
+    const hit = raycaster.intersectObject(m.modelMesh, false)[0];
     if (!hit) return;
-    const n = hit.face.normal.clone().transformDirection(modelMesh.matrixWorld);
-    pushHistory();
-    state.points.push({
-      position: hit.point.toArray(),
+    const n = hit.face.normal.clone().transformDirection(m.modelMesh.matrixWorld);
+    // The group carries a purely visual layout offset (see layoutNewModel) —
+    // the point sent to the server has to be back in the model's own local
+    // frame, the one it thinks z=0 and the plate mean.
+    const local = hit.point.clone().sub(m.group.position);
+    pushHistory(m);
+    m.points.push({
+      position: local.toArray(),
       normal: n.toArray(),
       forced: true,          // a hand-placed support is never thinned away
       source: 'manual',
     });
     log('added a support');
-    state.dropped = new Set();
-    rebuildMarkers();
+    m.dropped = new Set();
+    rebuildMarkers(m);
     markStale('geometry');
     return;
   }
 
-  if (markers.length && show.points) {
-    const hit = raycaster.intersectObjects(markers, false)[0];
+  if (m.markers.length && show.points) {
+    const hit = raycaster.intersectObjects(m.markers, false)[0];
     if (hit && hit.instanceId != null) {
       // Instances are grouped by flavour, so the instance index is not the
       // point index — the mesh carries the mapping back.
-      pushHistory();
-      state.points.splice(hit.object.userData.at[hit.instanceId], 1);
+      pushHistory(m);
+      m.points.splice(hit.object.userData.at[hit.instanceId], 1);
       log('deleted a support');
-      state.dropped = new Set();
-      rebuildMarkers();
+      m.dropped = new Set();
+      rebuildMarkers(m);
       markStale('geometry');
+      return;
     }
   }
+
+  // Nothing above matched: a plain click on some model's surface. If it is a
+  // model other than the active one, that click is the whole gesture — click
+  // a model to make it active, same as clicking its chip in the panel.
+  const meshes = [...state.models.values()].map((x) => x.modelMesh).filter(Boolean);
+  if (!meshes.length) return;
+  const hit = raycaster.intersectObjects(meshes, false)[0];
+  if (!hit) return;
+  const owner = [...state.models.values()].find((x) => x.modelMesh === hit.object);
+  if (owner && owner.sid !== state.activeSid) switchModel(owner.sid);
+});
+
+// A cancelled gesture (an interrupted browser/OS drag) skips pointerup
+// entirely — this drops the drag without committing it, same treatment
+// pointercancel already got on the old wheel.
+renderer.domElement.addEventListener('pointercancel', () => {
+  if (ringDrag) { controls.enabled = true; $('rot' + ringDrag.axis).step = $('rot' + ringDrag.axis).dataset.step; ringDrag = null; }
+  if (moveDrag) { controls.enabled = true; moveDrag = null; }
+  downAt = null;
 });
 
 document.querySelectorAll('[data-toggle]').forEach(btn => {
@@ -1068,6 +1966,11 @@ document.querySelectorAll('[data-toggle]').forEach(btn => {
   // Every other chip is a bare visibility flag; this one has to fetch data
   // the first time it is switched on, so it keeps its own handler above.
   if (k === 'overhang') { btn.onclick = () => toggleOverhang(btn); return; }
+  // The two gizmo modes are mutually exclusive and have real scene setup and
+  // teardown to do — see setGizmoMode above — so, same as overhang, they
+  // keep their own handler instead of the bare show[] flip below.
+  if (k === 'rotatemode') { btn.onclick = () => setGizmoMode('rotate'); return; }
+  if (k === 'movemode') { btn.onclick = () => setGizmoMode('move'); return; }
   btn.onclick = () => {
     show[k] = !show[k];
     btn.classList.toggle('on', show[k]);
@@ -1120,11 +2023,12 @@ function differs(a, b) {
  *  still naming, and offer the way back. Without this the panel simply lies
  *  after the first nudge: it goes on saying "ender3" whatever you do to it. */
 function markDrift() {
-  if (!state.preset) return;
+  const m = active();
+  if (!m?.preset) return;
   const now = overrides();
   let any = false;
   for (const [fold, keys] of Object.entries(FOLD_KEYS)) {
-    const off = keys.some(k => state.preset[k] !== undefined && differs(now[k], state.preset[k]));
+    const off = keys.some(k => m.preset[k] !== undefined && differs(now[k], m.preset[k]));
     any = any || off;
     const el = document.querySelector(`details.fold[data-fold="${fold}"] .drift`);
     if (el) el.classList.toggle('on', off);
@@ -1139,16 +2043,23 @@ function markDrift() {
  *  points and then had its geometry built out of the old preset's numbers. The
  *  name matters because half of a preset — the nozzle, the clearances, the
  *  printable limit — reaches no slider at all, and only stage 2 being told the
- *  name picks that half up. It rides on state.pendingPreset until it does. */
+ *  name picks that half up. It rides on m.pendingPreset until it does. */
 function applyPreset(name) {
+  state.presetName = name;
+  const m = active();
   const p = state.presets?.[name];
   if (p) {
-    state.preset = p;
+    if (m) m.preset = p;
     syncSliders(p);
   }
-  state.pendingPreset = name;
-  markDrift();
-  if (state.sid) markStale('points');
+  if (m) {
+    m.pendingPreset = name;
+    // syncSliders moves the dials in code, which fires no `change` event, so
+    // the panel listener that normally files them never runs.
+    captureSettings();
+    markDrift();
+    markStale('points');
+  }
 }
 
 $('preset').addEventListener('change', () => applyPreset($('preset').value));
@@ -1160,6 +2071,10 @@ $('revert').onclick = () => applyPreset($('preset').value);
 // their slider, so a typed value arrives here as a change on the slider's id,
 // which is what DIAL_SCOPE is keyed by.
 $('panel').addEventListener('change', (e) => {
+  // The dials belong to the selected model, so a move is filed on it here and
+  // nowhere else. Still not a listener that runs a stage — it copies a value
+  // and stops, exactly as markStale does.
+  captureSettings();
   markDrift();
   if (e.target.id === 'lift') previewLift();
   const scope = DIAL_SCOPE[e.target.id];
@@ -1175,7 +2090,8 @@ $('resetpoints').onclick = () => {
 };
 
 $('download').onclick = async () => {
-  if (!state.sid) return;
+  const m = active();
+  if (!m) return;
   const fmt = $('fmt3mf').checked ? '3mf' : 'stl';
   const separate = $('dlsep').checked;
   // Serverless there is nothing to navigate to: the file is assembled in the
@@ -1186,12 +2102,12 @@ $('download').onclick = async () => {
       // Two plain files, not a zip — a browser can balk at saving two files
       // from one click at once, so the model download always finishes before
       // the supports one starts.
-      await download(`/api/export/${state.sid}?fmt=${fmt}&separate=true&part=model`);
+      await download(`/api/export/${m.sid}?fmt=${fmt}&separate=true&part=model`);
       try {
-        await download(`/api/export/${state.sid}?fmt=${fmt}&separate=true&part=supports`);
+        await download(`/api/export/${m.sid}?fmt=${fmt}&separate=true&part=supports`);
       } catch (err) { log(`no supports to export yet: ${err.message}`, 'w'); }
     } else {
-      await download(`/api/export/${state.sid}?fmt=${fmt}&separate=false`);
+      await download(`/api/export/${m.sid}?fmt=${fmt}&separate=false`);
     }
   } catch (err) { log(`export failed: ${err.message}`, 'e'); }
   finally { busy(false); }
@@ -1206,13 +2122,13 @@ for (const ev of ['dragenter', 'dragover']) {
 document.addEventListener('dragleave', (e) => {
   if (e.relatedTarget) return;
   drop.classList.remove('over');
-  if (state.sid) drop.classList.add('hide');
+  if (state.activeSid) drop.classList.add('hide');
 });
 document.addEventListener('drop', (e) => {
   e.preventDefault();
   drop.classList.remove('over');
   const file = e.dataTransfer?.files?.[0];
-  if (file) upload(file); else if (state.sid) drop.classList.add('hide');
+  if (file) upload(file); else if (state.activeSid) drop.classList.add('hide');
 });
 drop.addEventListener('click', () => {
   const input = document.createElement('input');
@@ -1270,6 +2186,31 @@ stacked.addEventListener('change', placeLegend);
 addEventListener('resize', placeLegend);
 placeLegend();
 
+//
+// The legend's own fold — open by default (nothing here explains the two new
+// gizmo modes at a glance without it), remembered after that the same way
+// the panel's fold sections already are.
+//
+const LEGEND_KEY = 'rsupport.legendOpen';
+
+function readLegendOpen() {
+  try {
+    const v = localStorage.getItem(LEGEND_KEY);
+    return v === null ? true : v === '1';
+  } catch { return true; }
+}
+
+function setLegendOpen(open) {
+  $('legend').classList.toggle('collapsed', !open);
+  $('legendToggle').textContent = open ? 'hide' : 'show';
+  $('legendToggle').setAttribute('aria-expanded', String(open));
+  try { localStorage.setItem(LEGEND_KEY, open ? '1' : '0'); } catch { /* private mode */ }
+}
+
+let legendOpen = readLegendOpen();
+setLegendOpen(legendOpen);
+$('legendToggle').addEventListener('click', () => { legendOpen = !legendOpen; setLegendOpen(legendOpen); });
+
 // ---------------------------------------------------------------- startup
 
 (async function init() {
@@ -1300,9 +2241,11 @@ placeLegend();
     }
     sel.value = def;
     state.presets = presets;
-    state.preset = presets[def];
+    state.presetName = def;
+    // Sliders reflect the chosen preset even before a model exists, so the
+    // very first upload's stage-2 call sends sensible overrides rather than
+    // whatever the bare HTML attributes happened to default to.
     syncSliders(presets[def]);
-    state.params = presets[def];
   } catch (err) {
     busy(false);
     log(isServerless
