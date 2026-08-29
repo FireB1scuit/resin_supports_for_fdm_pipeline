@@ -290,6 +290,12 @@ async function loadSTL(m, url, kind, signal) {
   // refetched here rather than left stale until somebody happens to retoggle
   // it.
   if (kind === 'model' && show.overhang) await loadOverhang(signal);
+  // Same reasoning as the overlay: the gizmo is built off this mesh's own
+  // bounding box (see buildGizmo), so a replaced mesh strands it exactly the
+  // way a replaced pose strands the overlay — refresh it here rather than
+  // leaving it pointing at geometry that no longer exists. This is also what
+  // picks the gizmo back up after a rotation commit's own reload.
+  if (kind === 'model' && m.sid === state.activeSid) refreshGizmo();
   return mesh;
 }
 
@@ -549,15 +555,16 @@ function syncSliders(p) {
   markDrift();
 }
 
-/** Put the current model's last-applied rotation into the wheels — used on
- *  upload (0/0/0) and on switching the active model (whatever it was left
- *  turned to). */
+/** Put the current model's last-applied rotation into the readout boxes —
+ *  used on upload (0/0/0) and on switching the active model (whatever it was
+ *  left turned to). The gizmo itself is refreshed separately (see
+ *  refreshGizmo below) since it also depends on which model is active and
+ *  whether rotation mode is even on. */
 function syncRotation(m) {
   $('rotx').value = m.rotation.rx;
   $('roty').value = m.rotation.ry;
   $('rotz').value = m.rotation.rz;
   showRotationValues();
-  ROTATION_IDS.forEach(id => updateWheel(id));
 }
 
 //
@@ -641,96 +648,124 @@ function bindValueBox(id) {
 
 VALUE_IDS.concat(ROTATION_IDS).forEach(bindValueBox);
 
-// ------------------------------------------------------------ rotation wheels
+// -------------------------------------------------------------- gizmo mode
 //
-// Replaces the old linear sliders for X/Y/Z with a circular dial per axis —
-// dragging it around traces the actual turn the way a linear slider never
-// could. Each wheel wraps a plain `<input type=range min=-180 max=180>` that
-// is still the value every existing rotation function reads and writes
-// (`bindValueBox` above already wired its number box up to it); the wheel
-// only adds a second, circular way to move that same value; and it applies
-// on interaction exactly as the slider it replaced did — see `rerotate`
-// below, still bound to the range's `change` event.
+// Bambu-Studio-style: rotation and movement are viewport gizmos, not sidebar
+// dials. `rotx`/`roty`/`rotz` are still exactly the three absolute-angle
+// values every rotation function already read and wrote (`bindValueBox`
+// above wires their number boxes up); dragging a ring just moves the same
+// values a dragged wheel used to, and still applies on release through the
+// same `rerotate`, still bound to the range's `change` event below. Movement
+// has no value store at all — it is a pure client-side rearrangement of
+// `ModelEntry.group.position.x/y`, the same field `layoutNewModel` already
+// uses to keep freshly uploaded models apart (see its own comment for why
+// that is never sent to the server). The pointer handling for both lives
+// down in the interaction section, alongside the raycaster it shares with
+// click-to-select; this section only builds/tears down the gizmo mesh and
+// keeps it in step with which model is active.
+//
+// Colours: violet/lime/indigo rather than the traditional red/green/blue —
+// red is already this app's "failure" (a dropped contact) and green reads as
+// "success" in the log, so reusing either on a gizmo ring sitting in the same
+// viewport would spend a hue this app has already promised to one meaning.
+// See the mirrored --c-gizmo-* vars in index.html for the exact hex.
+const GIZMO_COLOR = { x: 0xa06cff, y: 0xaee34a, z: 0x5a86ff };
 
-function initWheel(id) {
-  const s = $(id);
-  const wheel = $(id + '_wheel');
-  const pointer = wheel.querySelector('.dial-pointer');
+let gizmoMode = null;      // null | 'rotate' | 'move'
+let gizmoGroup = null;     // THREE.Group of the three rings, child of the active model's group
+let gizmoRings = null;     // { x, y, z } meshes, keyed the same way ringDrag.axis is
+let gizmoHover = null;     // which ring the pointer is over right now, or null
 
-  wheel.setAttribute('aria-valuemin', s.min);
-  wheel.setAttribute('aria-valuemax', s.max);
-
-  let dragging = false;
-
-  function angleFromEvent(e) {
-    const rect = wheel.getBoundingClientRect();
-    const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
-    const dx = e.clientX - cx, dy = e.clientY - cy;
-    // 0 degrees is straight up, positive clockwise — atan2(dx, -dy) gives
-    // exactly that, and it is already in [-180, 180], the wheel's own range.
-    const raw = Math.atan2(dx, -dy) * 180 / Math.PI;
-    return Math.max(+s.min, Math.min(+s.max, Math.round(raw)));
-  }
-
-  function move(e) {
-    if (!dragging) return;
-    const deg = angleFromEvent(e);
-    if (+s.value !== deg) {
-      s.value = deg;
-      s.step = 'any';
-      s.dispatchEvent(new Event('input'));
-    }
-  }
-
-  wheel.addEventListener('pointerdown', (e) => {
-    dragging = true;
-    wheel.setPointerCapture(e.pointerId);
-    move(e);
-  });
-  wheel.addEventListener('pointermove', move);
-  function release(e) {
-    if (!dragging) return;
-    dragging = false;
-    try { wheel.releasePointerCapture(e.pointerId); } catch { /* already gone */ }
-    s.step = s.dataset.step;
-    // Applies on release, same as letting go of the old linear slider —
-    // rotation is one of the two dials that acts at once rather than waiting
-    // for the generate button (see the note above `rerotate`).
-    s.dispatchEvent(new Event('change'));
-  }
-  wheel.addEventListener('pointerup', release);
-  wheel.addEventListener('pointercancel', release);
-
-  // Keyboard makes the wheel a real ARIA slider rather than a mouse-only one:
-  // the range itself is taken out of the tab order (tabindex="-1" in the
-  // markup) so the wheel is the sole, single stop for this control.
-  wheel.addEventListener('keydown', (e) => {
-    let delta = 0;
-    if (e.key === 'ArrowRight' || e.key === 'ArrowUp') delta = 1;
-    else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') delta = -1;
-    else return;
-    e.preventDefault();
-    s.value = Math.max(+s.min, Math.min(+s.max, +s.value + delta));
-    s.dispatchEvent(new Event('input'));
-    s.dispatchEvent(new Event('change'));
-  });
-
-  s.addEventListener('input', () => updateWheel(id));
-  s.addEventListener('change', () => updateWheel(id));
-  updateWheel(id);
+function disposeGizmo() {
+  if (!gizmoGroup) return;
+  gizmoGroup.parent?.remove(gizmoGroup);
+  gizmoGroup.traverse((o) => { o.geometry?.dispose(); o.material?.dispose(); });
+  gizmoGroup = null;
+  gizmoRings = null;
+  gizmoHover = null;
 }
 
-/** Point the wheel's indicator at the range's current value — called whenever
- *  that value moves, whichever of the three ways it can move: the wheel being
- *  dragged, the keyboard, or a value typed into the adjacent number box. */
-function updateWheel(id) {
-  const s = $(id);
-  const pointer = $(id + '_wheel').querySelector('.dial-pointer');
-  pointer.style.transform = `rotate(${+s.value}deg)`;
-  $(id + '_wheel').setAttribute('aria-valuenow', s.value);
+/** Build the three rings on `m`, sized off its own bounding box so the gizmo
+ *  is usable whether the model is 8mm or 300mm — and centred on that box, not
+ *  on the group origin, since a tall model's natural handle is at its own
+ *  middle. Added as a child of `m.group` so it inherits the same layout/move
+ *  offset the model mesh does, and moves with a manual drag for free. */
+function buildGizmo(m) {
+  disposeGizmo();
+  if (!m || !m.modelMesh) return;
+
+  const geom = m.modelMesh.geometry;
+  geom.computeBoundingBox();
+  const box = geom.boundingBox;
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+
+  const radius = Math.max(Math.max(size.x, size.y, size.z) * 0.65, 5);
+  const tube = Math.max(radius * 0.035, 0.15);
+
+  gizmoGroup = new THREE.Group();
+  gizmoGroup.position.copy(center);
+  gizmoGroup.renderOrder = 999;
+  m.group.add(gizmoGroup);
+
+  gizmoRings = {};
+  // Each ring's hole axis is the axis it turns the model about. A torus is
+  // built with its hole along Z, so X and Y need a quarter turn to stand it
+  // up in the other two planes; Z is already right.
+  const defs = [
+    ['x', GIZMO_COLOR.x, (o) => { o.rotation.y = Math.PI / 2; }],
+    ['y', GIZMO_COLOR.y, (o) => { o.rotation.x = -Math.PI / 2; }],
+    ['z', GIZMO_COLOR.z, () => {}],
+  ];
+  for (const [axis, color, orient] of defs) {
+    const mesh = new THREE.Mesh(
+      new THREE.TorusGeometry(radius, tube, 12, 64),
+      // depthTest off (and a high renderOrder) so the ring stays grabbable
+      // and visible even where it passes through the model, the same reason
+      // Bambu's own gizmo draws in front of the object it is turning.
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: .8, depthTest: false, depthWrite: false }),
+    );
+    orient(mesh);
+    mesh.renderOrder = 999;
+    mesh.userData.axis = axis;
+    gizmoGroup.add(mesh);
+    gizmoRings[axis] = mesh;
+  }
 }
 
-ROTATION_IDS.forEach(initWheel);
+/** Show or hide the little hover highlight on a ring — the only feedback
+ *  besides the cursor that a drag is about to grab this particular axis. */
+function setGizmoHover(axis) {
+  if (axis === gizmoHover) return;
+  if (gizmoHover && gizmoRings?.[gizmoHover]) gizmoRings[gizmoHover].material.opacity = .8;
+  gizmoHover = axis;
+  if (gizmoHover && gizmoRings?.[gizmoHover]) gizmoRings[gizmoHover].material.opacity = 1;
+}
+
+/** Keep the gizmo (and its readout panel) matching whichever model is active
+ *  and whether rotation mode is even on. Called after every model-mesh
+ *  reload (upload, a rotation commit, a refloat — see loadSTL) and every
+ *  time the active model or the mode itself changes, since none of those
+ *  reliably fire the other two. */
+function refreshGizmo() {
+  const m = active();
+  if (gizmoMode === 'rotate' && m?.modelMesh) buildGizmo(m); else disposeGizmo();
+  $('gizmoPanel').hidden = !(gizmoMode === 'rotate' && m);
+}
+
+/** The two top-left mode buttons — mutually exclusive, Bambu-style: turning
+ *  one on turns the other off. Neither is a `show[]` visibility flag like the
+ *  other viewport chips (see the generic `[data-toggle]` handler below) since
+ *  each has real setup/teardown to do, the same reason `overhang` keeps its
+ *  own handler instead of using that generic one. */
+function setGizmoMode(next) {
+  if (ringDrag) { controls.enabled = true; ringDrag = null; }
+  if (moveDrag) { controls.enabled = true; moveDrag = null; }
+  gizmoMode = gizmoMode === next ? null : next;
+  document.querySelector('[data-toggle="rotatemode"]').classList.toggle('on', gizmoMode === 'rotate');
+  document.querySelector('[data-toggle="movemode"]').classList.toggle('on', gizmoMode === 'move');
+  refreshGizmo();
+}
 
 // ---------------------------------------------------------------- pipeline
 //
@@ -805,6 +840,10 @@ async function switchModel(sid) {
   // it toggled on while active doesn't have one yet even though the toggle
   // itself is still showing "on" from whichever model set it there.
   if (show.overhang && !m.overhangMesh) await loadOverhang();
+  // The gizmo, if rotation mode is on, is a child of whichever model's group
+  // it was last built for — switching the active model has to move it (or
+  // hide it, if the new active model has no mesh yet).
+  refreshGizmo();
   rebuildMarkers(m);
   $('resetpoints').disabled = !m.history.length;
   if (m.lastBuild) showStats(m, m.lastBuild); else $('stats').innerHTML = '&mdash;';
@@ -954,7 +993,6 @@ ROTATION_IDS.forEach(id => $(id).addEventListener('change', rerotate));
 $('asloaded').onclick = () => {
   $('rotx').value = 0; $('roty').value = 0; $('rotz').value = 0;
   showRotationValues();
-  ROTATION_IDS.forEach(id => updateWheel(id));
   rerotate();
 };
 
@@ -1320,18 +1358,201 @@ const raycaster = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
 let downAt = null;
 
-renderer.domElement.addEventListener('pointerdown', (e) => { downAt = { x: e.clientX, y: e.clientY }; });
+function setNdcFromEvent(e) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  ndc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  ndc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+}
+
+// -------------------------------------------------------- gizmo dragging
+//
+// Both gizmo drags take over the gesture from OrbitControls: `controls`
+// checks `enabled` at the top of its own pointermove handler (see
+// OrbitControls.js), so switching it off here — even though OrbitControls'
+// own pointerdown listener, registered first, already ran by the time this
+// one does — still stops it before the camera actually moves on the very
+// next move event. Both drags end the same way a dragged wheel ended: the
+// range's `change` event still applies the rotation exactly once, on
+// release, through `rerotate` below — nothing about that commit path
+// changed, only what moves the value.
+
+let ringDrag = null; // { axis, plane, pivot, u, v, startValue, prevAngle, accumDeg }
+let moveDrag = null; // { m, plane, start: Vector3, startX, startY }
+
+function axisVector(axis) {
+  return axis === 'x' ? new THREE.Vector3(1, 0, 0)
+       : axis === 'y' ? new THREE.Vector3(0, 1, 0)
+       :                 new THREE.Vector3(0, 0, 1);
+}
+
+/** Two vectors spanning the plane perpendicular to `axis` — an arbitrary but
+ *  fixed frame for measuring an angle in that plane. Only the *change* in
+ *  that angle over a drag is ever used, so which direction reads as zero
+ *  never matters. */
+function planeBasis(axis) {
+  const arbitrary = Math.abs(axis.y) < 0.99 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+  const u = new THREE.Vector3().crossVectors(arbitrary, axis).normalize();
+  const v = new THREE.Vector3().crossVectors(axis, u).normalize();
+  return [u, v];
+}
+
+function angleInPlane(point, pivot, u, v) {
+  const rel = point.clone().sub(pivot);
+  return THREE.MathUtils.radToDeg(Math.atan2(rel.dot(v), rel.dot(u)));
+}
+
+/** `a - b`, wrapped into (-180, 180] — so a drag that sweeps past ±180° reads
+ *  as a small step in the right direction instead of a 360° jump. */
+function shortestDelta(a, b) {
+  return (((a - b + 180) % 360) + 360) % 360 - 180;
+}
+
+/** Rotate `m`'s mesh by `deg` about `axis`, pivoting on `pivot` (in the
+ *  model's own group-local space — the gizmo's own centre, see buildGizmo)
+ *  rather than the mesh's local origin, which is the plate, not the model's
+ *  middle. This is a preview only: the mesh this is applied to is discarded
+ *  and replaced wholesale the moment the commit's fresh geometry arrives (see
+ *  loadSTL), so there is nothing to reset it back out of afterwards. */
+function previewRotation(m, axis, pivot, deg) {
+  const q = new THREE.Quaternion().setFromAxisAngle(axis, THREE.MathUtils.degToRad(deg));
+  const rotatedPivot = pivot.clone().applyQuaternion(q);
+  m.modelMesh.position.copy(pivot).sub(rotatedPivot);
+  m.modelMesh.quaternion.copy(q);
+  if (m.overhangMesh) {
+    m.overhangMesh.position.copy(m.modelMesh.position);
+    m.overhangMesh.quaternion.copy(q);
+  }
+}
+
+function startRingDrag(mesh, e) {
+  const m = active();
+  if (!m || !gizmoGroup) return;
+  const axisName = mesh.userData.axis;
+  const axis = axisVector(axisName);
+  const pivot = gizmoGroup.getWorldPosition(new THREE.Vector3());
+  const [u, v] = planeBasis(axis);
+  const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(axis, pivot);
+  const hitPoint = new THREE.Vector3();
+  if (!raycaster.ray.intersectPlane(plane, hitPoint)) return;
+  const startAngle = angleInPlane(hitPoint, pivot, u, v);
+  ringDrag = {
+    axis: axisName, plane, pivot, u, v,
+    startValue: +$('rot' + axisName).value,
+    prevAngle: startAngle,
+    accumDeg: 0,
+    m, localPivot: gizmoGroup.position.clone(),
+  };
+  controls.enabled = false;
+  try { renderer.domElement.setPointerCapture(e.pointerId); } catch { /* already gone */ }
+}
+
+function updateRingDrag(e) {
+  setNdcFromEvent(e);
+  raycaster.setFromCamera(ndc, camera);
+  const hitPoint = new THREE.Vector3();
+  if (!raycaster.ray.intersectPlane(ringDrag.plane, hitPoint)) return;
+  const angle = angleInPlane(hitPoint, ringDrag.pivot, ringDrag.u, ringDrag.v);
+  ringDrag.accumDeg += shortestDelta(angle, ringDrag.prevAngle);
+  ringDrag.prevAngle = angle;
+  // Whole degrees, same as the old wheel's own Math.round — the box shows no
+  // decimals (see DECIMALS.rotx) and the range's own step is 1. Rounding here
+  // rather than leaving it to `endRingDrag`'s step reset matters: a browser
+  // re-clamps a range's *current* value to its step the moment `.step`
+  // changes, so a small, still-fractional drag would otherwise silently snap
+  // to 0 on release instead of committing the whole-degree turn it was.
+  const value = Math.max(-180, Math.min(180, Math.round(ringDrag.startValue + ringDrag.accumDeg)));
+  const s = $('rot' + ringDrag.axis);
+  s.step = 'any';
+  s.value = value;
+  s.dispatchEvent(new Event('input')); // keeps the readout box in step, same as the old wheel
+  previewRotation(ringDrag.m, axisVector(ringDrag.axis), ringDrag.localPivot, value - ringDrag.startValue);
+}
+
+function endRingDrag() {
+  const s = $('rot' + ringDrag.axis);
+  s.step = s.dataset.step;
+  controls.enabled = true;
+  ringDrag = null;
+  // Applies on release, same as letting go of the old wheel — rotation is
+  // one of the two dials that acts at once rather than waiting for the
+  // generate button (see the note above `rerotate`).
+  s.dispatchEvent(new Event('change'));
+}
+
+/** Movement mode has no gizmo mesh at all — dragging the model's own surface
+ *  is the whole control, the same direct-body drag Bambu Studio itself
+ *  supports. The drag plane is simply world Z=0: only the XY component of
+ *  where it crosses that plane is ever read, so which Z it sits at makes no
+ *  difference to the result. */
+function startMoveDrag(m, e) {
+  const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+  const start = new THREE.Vector3();
+  if (!raycaster.ray.intersectPlane(plane, start)) return;
+  moveDrag = { m, plane, start, startX: m.group.position.x, startY: m.group.position.y };
+  controls.enabled = false;
+  try { renderer.domElement.setPointerCapture(e.pointerId); } catch { /* already gone */ }
+}
+
+function updateMoveDrag(e) {
+  setNdcFromEvent(e);
+  raycaster.setFromCamera(ndc, camera);
+  const point = new THREE.Vector3();
+  if (!raycaster.ray.intersectPlane(moveDrag.plane, point)) return;
+  // Overrides layoutNewModel's automatic spacing outright, same as it says
+  // it would — there is nothing to reconcile, the group position is just
+  // whichever of the two touched it last.
+  moveDrag.m.group.position.x = moveDrag.startX + (point.x - moveDrag.start.x);
+  moveDrag.m.group.position.y = moveDrag.startY + (point.y - moveDrag.start.y);
+  // Z is never touched — lift_height on the panel is the only thing that
+  // governs it, per CLAUDE.md.
+}
+
+function endMoveDrag() {
+  controls.enabled = true;
+  moveDrag = null;
+}
+
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  downAt = { x: e.clientX, y: e.clientY };
+  if (state.busy) return;
+  const m = active();
+  if (!m) return;
+  setNdcFromEvent(e);
+  raycaster.setFromCamera(ndc, camera);
+
+  if (gizmoMode === 'rotate' && gizmoRings) {
+    const hit = raycaster.intersectObjects(Object.values(gizmoRings), false)[0];
+    if (hit) { startRingDrag(hit.object, e); e.preventDefault(); return; }
+  }
+  if (gizmoMode === 'move' && m.modelMesh) {
+    const hit = raycaster.intersectObject(m.modelMesh, false)[0];
+    if (hit) { startMoveDrag(m, e); e.preventDefault(); return; }
+  }
+});
+
+renderer.domElement.addEventListener('pointermove', (e) => {
+  if (ringDrag) { updateRingDrag(e); return; }
+  if (moveDrag) { updateMoveDrag(e); return; }
+  // Idle hover: which ring, if any, would a click grab right now — the only
+  // feedback besides the cursor that a ring is about to be draggable.
+  if (gizmoMode === 'rotate' && gizmoRings) {
+    setNdcFromEvent(e);
+    raycaster.setFromCamera(ndc, camera);
+    const hit = raycaster.intersectObjects(Object.values(gizmoRings), false)[0];
+    setGizmoHover(hit ? hit.object.userData.axis : null);
+  }
+});
 
 renderer.domElement.addEventListener('pointerup', (e) => {
+  if (ringDrag) { endRingDrag(); downAt = null; return; }
+  if (moveDrag) { endMoveDrag(); downAt = null; return; }
   // Ignore the pointerup that ends an orbit drag.
   if (!downAt || Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 4) return;
   if (state.busy) return;
   const m = active();
   if (!m) return;
 
-  const rect = renderer.domElement.getBoundingClientRect();
-  ndc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-  ndc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  setNdcFromEvent(e);
   raycaster.setFromCamera(ndc, camera);
 
   if (e.shiftKey) {
@@ -1383,11 +1604,25 @@ renderer.domElement.addEventListener('pointerup', (e) => {
   if (owner && owner.sid !== state.activeSid) switchModel(owner.sid);
 });
 
+// A cancelled gesture (an interrupted browser/OS drag) skips pointerup
+// entirely — this drops the drag without committing it, same treatment
+// pointercancel already got on the old wheel.
+renderer.domElement.addEventListener('pointercancel', () => {
+  if (ringDrag) { controls.enabled = true; $('rot' + ringDrag.axis).step = $('rot' + ringDrag.axis).dataset.step; ringDrag = null; }
+  if (moveDrag) { controls.enabled = true; moveDrag = null; }
+  downAt = null;
+});
+
 document.querySelectorAll('[data-toggle]').forEach(btn => {
   const k = btn.dataset.toggle;
   // Every other chip is a bare visibility flag; this one has to fetch data
   // the first time it is switched on, so it keeps its own handler above.
   if (k === 'overhang') { btn.onclick = () => toggleOverhang(btn); return; }
+  // The two gizmo modes are mutually exclusive and have real scene setup and
+  // teardown to do — see setGizmoMode above — so, same as overhang, they
+  // keep their own handler instead of the bare show[] flip below.
+  if (k === 'rotatemode') { btn.onclick = () => setGizmoMode('rotate'); return; }
+  if (k === 'movemode') { btn.onclick = () => setGizmoMode('move'); return; }
   btn.onclick = () => {
     show[k] = !show[k];
     btn.classList.toggle('on', show[k]);
@@ -1595,6 +1830,31 @@ function placeLegend() {
 stacked.addEventListener('change', placeLegend);
 addEventListener('resize', placeLegend);
 placeLegend();
+
+//
+// The legend's own fold — open by default (nothing here explains the two new
+// gizmo modes at a glance without it), remembered after that the same way
+// the panel's fold sections already are.
+//
+const LEGEND_KEY = 'rsupport.legendOpen';
+
+function readLegendOpen() {
+  try {
+    const v = localStorage.getItem(LEGEND_KEY);
+    return v === null ? true : v === '1';
+  } catch { return true; }
+}
+
+function setLegendOpen(open) {
+  $('legend').classList.toggle('collapsed', !open);
+  $('legendToggle').textContent = open ? 'hide' : 'show';
+  $('legendToggle').setAttribute('aria-expanded', String(open));
+  try { localStorage.setItem(LEGEND_KEY, open ? '1' : '0'); } catch { /* private mode */ }
+}
+
+let legendOpen = readLegendOpen();
+setLegendOpen(legendOpen);
+$('legendToggle').addEventListener('click', () => { legendOpen = !legendOpen; setLegendOpen(legendOpen); });
 
 // ---------------------------------------------------------------- startup
 

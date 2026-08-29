@@ -37,6 +37,16 @@
     --c-support: #f2802e;
     --c-point: #35d6ff;
     --c-dropped: #ff3b30;
+
+    /* Mirrored from GIZMO_COLOR in app.js, same reason. Chosen to avoid every hue
+       already spent above (and the amber/teal/hazard-yellow/focus-blue used
+       elsewhere in the chrome) rather than the traditional red/green/blue
+       axis convention — red and blue are both already close to colours this
+       app assigns other meanings, and the gizmo lives in the same viewport
+       those meanings are read in. */
+    --c-gizmo-x: #a06cff;
+    --c-gizmo-y: #aee34a;
+    --c-gizmo-z: #5a86ff;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
@@ -187,6 +197,22 @@
   #legend .sw.checker {
     background: repeating-conic-gradient(#f2c200 0% 25%, #101010 0% 50%) 0 0 / 8px 8px;
   }
+  /* A ring's swatch echoes its shape as well as its colour — a solid square
+     would promise a filled disc the viewport never draws. */
+  #legend .sw.ring { background: none; border: 2px solid; border-radius: 50%; }
+
+  #legend .legend-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    margin-bottom: 4px;
+  }
+  #legend .legend-head span {
+    font-weight: 600; color: var(--text); text-transform: uppercase;
+    font-size: 10px; letter-spacing: .08em;
+  }
+  #legend #legendToggle { padding: 2px 7px; font-size: 10px; border-radius: 5px; }
+  /* Open by default — CLAUDE.md is explicit about that — and remembered
+     after that the same way the panel's own fold sections are. */
+  #legend.collapsed #legendBody { display: none; }
   /* Stacked, there is no canvas corner to sit in — the legend moves into the
      panel rather than vanishing. It used to be display:none below 680px, which
      took away the only explanation of click-to-delete and shift-click-to-add on
@@ -278,36 +304,30 @@
   .row label { flex: 1; min-width: 0; color: var(--dim); }
   input[type=range] { flex: 0 1 96px; min-width: 52px; accent-color: var(--control); }
 
-  /* The rotation wheel. It carries a real, focusable ARIA slider role of its
-     own — the native <input type=range> beside it is the value the rest of
-     the app already reads and writes (see app.js), kept purely as that store
-     and taken out of the tab order so a wheel is not two stops in it. Drag
-     anywhere on the face; the pointer inside shows the current angle the way
-     a physical dial would, 0 pointing straight up. */
-  .dial {
-    position: relative; flex: none; width: 30px; height: 30px; border-radius: 50%;
-    background: var(--panel-2); border: 1px solid var(--line);
-    cursor: grab; touch-action: none;
-  }
-  .dial:hover { border-color: var(--line-2); }
-  .dial:active { cursor: grabbing; }
-  .dial::after {
-    content: ""; position: absolute; left: 50%; top: 50%; width: 4px; height: 4px;
-    margin: -2px 0 0 -2px; border-radius: 50%; background: var(--dim);
-  }
-  .dial-face { position: absolute; inset: 0; }
-  .dial-pointer {
-    position: absolute; left: 50%; top: 3px; width: 2px; height: 11px;
-    margin-left: -1px; border-radius: 1px; background: var(--control);
-    transform-origin: 50% 12px; pointer-events: none;
-  }
-  /* The native range is visually hidden rather than display:none — it stays
-     in the layout as a real element with real focus and change events, just
-     with no footprint and no box a sighted user would see. */
-  .dial-native {
+  /* The rotation gizmo lives in the viewport now (see app.js), not the panel
+     — rotx/roty/rotz stay exactly the value store they always were, just
+     driven by a dragged ring instead of a dragged wheel. Visually hidden
+     rather than display:none, so they keep real focus and change events with
+     no footprint and no box a sighted user would see. */
+  .hidden-range {
     position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
     border: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap;
   }
+
+  /* The compact X/Y/Z readout that floats over the canvas while rotation
+     mode is active — see the panel-removal note on #gizmoPanel below. The
+     number boxes are the one thing kept from the old sidebar wheels; typing
+     into one still turns the model exactly as it always did. */
+  #gizmoPanel {
+    pointer-events: auto;
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    background: rgba(20,22,26,.82); border: 1px solid var(--line); border-radius: 8px;
+    padding: 6px 8px;
+  }
+  #gizmoPanel .num i.axis { font-weight: 700; }
+  #gizmoPanel .num i.axis.x { color: var(--c-gizmo-x); }
+  #gizmoPanel .num i.axis.y { color: var(--c-gizmo-y); }
+  #gizmoPanel .num i.axis.z { color: var(--c-gizmo-z); }
 
   /* The number beside a slider is the same value, typed instead of dragged.
      It reads as a readout until you click into it. */
@@ -537,6 +557,30 @@
       <button class="chip" data-toggle="points">contact points</button>
       <button class="chip" data-toggle="wire">wireframe</button>
       <button class="chip" data-toggle="overhang">overhang</button>
+      <!-- Bambu-style: a mode, not a dial. Turning one of these on shows a
+           gizmo on the selected model in the viewport itself rather than a
+           control in the sidebar — see the "gizmo mode" section in app.js
+           for why the sidebar wheels were replaced with this. The two are
+           mutually exclusive, same as Bambu's own gizmo selector. -->
+      <button class="chip" data-toggle="rotatemode"
+              title="drag a ring on the selected model to turn it about that axis">rotation mode</button>
+      <button class="chip" data-toggle="movemode"
+              title="drag the selected model to slide it sideways — lift still sets its height">movement mode</button>
+      <!-- The one thing kept from the old sidebar wheels: a typed, exact
+           degree value per axis. Shown only while rotation mode is on, next
+           to the gizmo it reads and writes — see refreshGizmo in app.js. -->
+      <div id="gizmoPanel" hidden>
+        <span class="num"><i class="axis x">X</i><input type="number" id="rotx_v" aria-label="rotate X value"><i>&deg;</i></span>
+        <span class="num"><i class="axis y">Y</i><input type="number" id="roty_v" aria-label="rotate Y value"><i>&deg;</i></span>
+        <span class="num"><i class="axis z">Z</i><input type="number" id="rotz_v" aria-label="rotate Z value"><i>&deg;</i></span>
+        <input type="range" id="rotx" min="-180" max="180" step="1" value="0"
+               class="hidden-range" tabindex="-1" aria-hidden="true">
+        <input type="range" id="roty" min="-180" max="180" step="1" value="0"
+               class="hidden-range" tabindex="-1" aria-hidden="true">
+        <input type="range" id="rotz" min="-180" max="180" step="1" value="0"
+               class="hidden-range" tabindex="-1" aria-hidden="true">
+        <button id="asloaded" class="tiny" type="button" disabled>file&rsquo;s pose</button>
+      </div>
     </div>
 
     <!-- The only thing in the app that builds a scaffold. Pressed again while
@@ -552,12 +596,23 @@
   </div>
 
   <div id="legend">
-    <div><span class="sw" style="background:var(--c-model)"></span>model</div>
-    <div><span class="sw" style="background:var(--c-support)"></span>supports</div>
-    <div><span class="sw" style="background:var(--c-point); opacity:.55"></span>contact point &mdash; click to delete</div>
-    <div><span class="sw" style="background:var(--c-dropped)"></span>unsupported &mdash; nothing could reach it</div>
-    <div><span class="sw checker"></span>overhang &mdash; steeper than the printable limit</div>
-    <div style="margin-top:4px">shift-click the model to add one &middot; ctrl-Z undoes</div>
+    <div class="legend-head">
+      <span>legend</span>
+      <button type="button" id="legendToggle" class="tiny" aria-expanded="true">hide</button>
+    </div>
+    <div id="legendBody">
+      <div><span class="sw" style="background:var(--c-model)"></span>model</div>
+      <div><span class="sw" style="background:var(--c-support)"></span>supports</div>
+      <div><span class="sw" style="background:var(--c-point); opacity:.55"></span>contact point &mdash; click to delete</div>
+      <div><span class="sw" style="background:var(--c-dropped)"></span>unsupported &mdash; nothing could reach it</div>
+      <div><span class="sw checker"></span>overhang &mdash; steeper than the printable limit</div>
+      <div><span class="sw ring" style="border-color:var(--c-gizmo-x)"></span>rotation gizmo, X ring</div>
+      <div><span class="sw ring" style="border-color:var(--c-gizmo-y)"></span>rotation gizmo, Y ring</div>
+      <div><span class="sw ring" style="border-color:var(--c-gizmo-z)"></span>rotation gizmo, Z ring</div>
+      <div style="margin-top:4px">click a model to select it &middot; shift-click it to add a support &middot; ctrl-Z undoes</div>
+      <div>rotation mode (top left) &mdash; drag a ring on the selected model to turn it</div>
+      <div>movement mode (top left) &mdash; drag the selected model to slide it sideways</div>
+    </div>
   </div>
 
   <div class="busy" id="busy"><div class="spinner"></div></div>
@@ -752,48 +807,6 @@
         <span class="num"><input type="number" id="coneh_v" aria-label="cone height value"><i>mm</i></span>
       </div>
     </details>
-
-    <section>
-      <h2>orientation</h2>
-      <p style="color:var(--dim); font-size:11px; margin:0 0 8px">
-        The model is used exactly as posed in the file, set down on the bed.
-        Rotate it by hand if it needs to sit differently — drag a wheel, or
-        type a value straight into its box.
-      </p>
-      <div class="row">
-        <label id="rotx_label">rotate X</label>
-        <div class="dial" id="rotx_wheel" role="slider" aria-labelledby="rotx_label"
-             aria-valuemin="-180" aria-valuemax="180" tabindex="0">
-          <div class="dial-face"><div class="dial-pointer"></div></div>
-        </div>
-        <input type="range" id="rotx" min="-180" max="180" step="1" value="0"
-               class="dial-native" tabindex="-1" aria-hidden="true">
-        <span class="num"><input type="number" id="rotx_v" aria-label="rotx value"><i>&deg;</i></span>
-      </div>
-      <div class="row">
-        <label id="roty_label">rotate Y</label>
-        <div class="dial" id="roty_wheel" role="slider" aria-labelledby="roty_label"
-             aria-valuemin="-180" aria-valuemax="180" tabindex="0">
-          <div class="dial-face"><div class="dial-pointer"></div></div>
-        </div>
-        <input type="range" id="roty" min="-180" max="180" step="1" value="0"
-               class="dial-native" tabindex="-1" aria-hidden="true">
-        <span class="num"><input type="number" id="roty_v" aria-label="roty value"><i>&deg;</i></span>
-      </div>
-      <div class="row">
-        <label id="rotz_label">rotate Z</label>
-        <div class="dial" id="rotz_wheel" role="slider" aria-labelledby="rotz_label"
-             aria-valuemin="-180" aria-valuemax="180" tabindex="0">
-          <div class="dial-face"><div class="dial-pointer"></div></div>
-        </div>
-        <input type="range" id="rotz" min="-180" max="180" step="1" value="0"
-               class="dial-native" tabindex="-1" aria-hidden="true">
-        <span class="num"><input type="number" id="rotz_v" aria-label="rotz value"><i>&deg;</i></span>
-      </div>
-      <div class="btns" style="margin-top:6px">
-        <button id="asloaded" disabled>file&rsquo;s pose</button>
-      </div>
-    </section>
 
     <section id="modelsSection" hidden>
       <h2>models</h2>
