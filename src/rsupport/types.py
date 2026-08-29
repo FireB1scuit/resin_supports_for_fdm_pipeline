@@ -66,7 +66,40 @@ class SupportParams:
     # overhangs by exactly `a`, so it must stay under printable_overhang_deg.
     # It also sets how far a shaft can travel sideways per layer, and therefore
     # how well the scaffold routes around the model.
+    #
+    # This is the *shallow* end of the routing search — the angle tried first,
+    # because a route found here is the tidiest, most vertical strut possible.
+    # See `strut_lean_max_deg` for the other end and `strut_lean_range` for
+    # what the search actually does with the two.
     strut_lean_deg: float = 40.0
+    # Steepest lean the routing search may escalate to when `strut_lean_deg`
+    # cannot find a route to the plate. None takes the printable limit itself
+    # (minus the same margin `strut_lean` keeps below it).
+    #
+    # A shaft routing around an obstacle already has to travel further
+    # sideways than one dropping straight down, which is exactly what makes
+    # its finished length longer than the straight-down minimum. Searching a
+    # *range* of lean angles, rather than testing one fixed value, is what
+    # lets that longer, more circuitous strut actually get built where the
+    # shallow angle alone would come up short and the point would be dropped.
+    # See `resin._route_to_plate` and `resin._make_shaft` for the search
+    # itself, and `strut_lean_range` for how the two bounds turn into the
+    # short list of angles it tries.
+    strut_lean_max_deg: float | None = None
+    # Shortest / longest a routed shaft's own length (base to top, measured
+    # along its actual — possibly bent — axis, see `resin.Shaft.length`) may
+    # be. A candidate route outside this range is refused just like one that
+    # cannot reach the plate at all, and the search tries the next lean angle
+    # before giving up on the point.
+    #
+    # Deliberately not derived from the nozzle, and deliberately inert by
+    # default (0 / None), the same way `brace_headroom` is: whether a strut
+    # is "too long to bother with" or "too short to trust" is a judgement
+    # about the print, not a quantity the nozzle sets, and leaving both inert
+    # keeps every existing measured drop budget in `tests/test_pipeline.py`
+    # unchanged for anyone who never touches these two.
+    shaft_min_length: float = 0.0
+    shaft_max_length: float | None = None
     # Fattest strut the avoidance field samples a collision radius for.
     max_strut_diameter: float = 3.0
     # Gap kept between a strut and the model surface.
@@ -251,3 +284,35 @@ def strut_lean(params: SupportParams) -> float:
     it, which is where callers should still reach for it.
     """
     return float(np.clip(params.strut_lean_deg, 1.0, params.printable_overhang_deg - 2.0))
+
+
+#: How many lean angles the routing search tries between the shallow default
+#: and the steep ceiling. Small on purpose: this is a short fixed list, not a
+#: backtracking search — see `strut_lean_range`.
+_LEAN_SEARCH_STEPS = 3
+
+
+def strut_lean_range(params: SupportParams, n: int = _LEAN_SEARCH_STEPS) -> np.ndarray:
+    """Ascending lean angles (degrees) the routing search tries, shallow first.
+
+    `strut_lean(params)` is always first: the shallowest angle, and so the
+    tidiest, shortest strut a route can possibly use. `strut_lean_max_deg`
+    (or the printable limit itself, less the same margin `strut_lean` keeps)
+    is always last. The steps between are evenly spaced.
+
+    This is what turns one fixed lean into a short, fixed *list* of leans —
+    :func:`rsupport.resin._route_to_plate` and
+    :func:`rsupport.resin._make_shaft` try them in order and stop at the
+    first that finds a route, so a position's guaranteed successor (see
+    `avoidance_polygon.PolygonAvoidanceField`) is always evaluated against a
+    single, consistent lean for the whole descent. There is no backtracking
+    and no per-layer angle switch: a shaft is built at exactly one lean,
+    chosen once before the descent starts.
+    """
+    lo = strut_lean(params)
+    limit = float(params.printable_overhang_deg) - 2.0
+    hi = limit if params.strut_lean_max_deg is None else float(params.strut_lean_max_deg)
+    hi = float(np.clip(hi, lo, max(limit, lo)))
+    if hi <= lo + 1e-9:
+        return np.array([lo])
+    return np.linspace(lo, hi, max(2, int(n)))
