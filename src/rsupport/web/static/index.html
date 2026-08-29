@@ -16,7 +16,14 @@
 
      Two: the chrome is therefore neutral. The only saturated colour left in
      the panel is the focus ring, so anything coloured on screen is carrying
-     information. */
+     information.
+
+     There is exactly one exemption from rule one, granted deliberately and on
+     request: the rotation gizmo's rings are the standard X=red / Y=green /
+     Z=blue axis convention. See --c-gizmo-* below for why that trade is
+     affordable — it turns on the gizmo being a transient modal overlay rather
+     than something on screen while a support colour is being read. Nothing
+     else gets to reuse a hue, and this one does not extend past the gizmo. */
   :root {
     --bg: #0f1115;
     --panel: #16181d;
@@ -38,15 +45,32 @@
     --c-point: #35d6ff;
     --c-dropped: #ff3b30;
 
-    /* Mirrored from GIZMO_COLOR in app.js, same reason. Chosen to avoid every hue
-       already spent above (and the amber/teal/hazard-yellow/focus-blue used
-       elsewhere in the chrome) rather than the traditional red/green/blue
-       axis convention — red and blue are both already close to colours this
-       app assigns other meanings, and the gizmo lives in the same viewport
-       those meanings are read in. */
-    --c-gizmo-x: #a06cff;
-    --c-gizmo-y: #aee34a;
-    --c-gizmo-z: #5a86ff;
+    /* Mirrored from GIZMO_COLOR in app.js, same reason.
+
+       THE ONE DELIBERATE EXCEPTION to rule one above, and it was asked for
+       explicitly. These used to be violet/lime/indigo precisely so that no
+       gizmo ring would spend a hue the viewport has already promised to a
+       meaning — red in particular says "nothing could support this". They are
+       now the standard X=red / Y=green / Z=blue axis convention instead,
+       because that convention is not decoration: it is the one every CAD and
+       slicer user already reads without being told, and a ring you have to
+       decode before you dare drag it is worse than a hue collision.
+
+       What makes the exception affordable is that the gizmo is a transient
+       modal overlay. It exists only while rotation mode is on, it is torn down
+       the moment that mode is off (see refreshGizmo in app.js), and nobody is
+       reading a support-colour decision — is that contact red? — in the same
+       breath as turning the model. Axis legibility beat palette purity here,
+       for this one control, on purpose. Do not "fix" it back.
+
+       X is left at pure red on purpose: it reads as the axis convention at a
+       glance and it is *further* from the softer red a dropped contact is
+       drawn in (--c-dropped) than a toned-down red would have been. Z is
+       lifted off pure #0000ff only because pure blue on a near-black canvas is
+       barely visible — same hue, not a dodge around the convention. */
+    --c-gizmo-x: #ff0000;
+    --c-gizmo-y: #00d43f;
+    --c-gizmo-z: #3b7bff;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
@@ -376,6 +400,15 @@
 
   #stats { color: var(--dim); font-size: 11.5px; line-height: 1.7; }
   #stats b { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 500; }
+  /* One press builds every model, so the block ends with what the plate as a
+     whole came to. Ruled off and a shade quieter because the lines above it are
+     about the selected model and this one is not — without the rule the two
+     read as one list and the totals look like they belong to the model named
+     at the top of the panel. */
+  #stats .all {
+    display: block; margin-top: 5px; padding-top: 5px;
+    border-top: 1px solid var(--line); font-size: 11px;
+  }
 
   /* The log used to hold 132px of the panel open at all times, in dim
      monospace, to tell you "built in 0.4s". With seven fold sections above it
@@ -551,11 +584,22 @@
 
   <div id="topbar">
     <div id="hud">
-      <button class="chip on" data-toggle="model">model</button>
-      <button class="chip on" data-toggle="supports">supports</button>
-      <button class="chip" data-toggle="points">contact points</button>
-      <button class="chip" data-toggle="wire">wireframe</button>
-      <button class="chip" data-toggle="overhang">overhang</button>
+      <!-- These five are view layers, and a layer is a statement about the
+           whole plate rather than about one model: each of them shows or hides
+           that layer on every loaded model at once — see applyVisibility in
+           app.js. Which model is *selected* is a separate thing entirely, and
+           is said with material rather than visibility: the selected one is
+           solid, the rest are dim and translucent. -->
+      <button class="chip on" data-toggle="model"
+              title="show the models — every loaded model, not just the selected one">model</button>
+      <button class="chip on" data-toggle="supports"
+              title="show every model&rsquo;s scaffold">supports</button>
+      <button class="chip" data-toggle="points"
+              title="show every model&rsquo;s contact points">contact points</button>
+      <button class="chip" data-toggle="wire"
+              title="draw every model as a wireframe">wireframe</button>
+      <button class="chip" data-toggle="overhang"
+              title="checker every model&rsquo;s faces steeper than the printable limit">overhang</button>
       <!-- Bambu-style: a mode, not a dial. Turning one of these on shows a
            gizmo on the selected model in the viewport itself rather than a
            control in the sidebar — see the "gizmo mode" section in app.js
@@ -582,15 +626,17 @@
       </div>
     </div>
 
-    <!-- The only thing in the app that builds a scaffold. Pressed again while
-         it is running, it stops the run — see `generate` in app.js. -->
+    <!-- The only thing in the app that builds a scaffold, and it builds every
+         loaded model in one press — each from its own settings, and only the
+         ones that are actually out of date. Pressed again while it is running,
+         it stops the batch — see `generate` in app.js. -->
     <div id="genwrap">
       <button id="generate" type="button" aria-describedby="gentip" disabled>
         <span class="spinner" aria-hidden="true"></span>
         <span class="dot" aria-hidden="true"></span>
         <span id="genlabel">generate</span>
       </button>
-      <div id="gentip" role="tooltip">Generate the supports using this button</div>
+      <div id="gentip" role="tooltip">Generate the supports for every model using this button</div>
     </div>
   </div>
 
@@ -608,7 +654,8 @@
       <div><span class="sw ring" style="border-color:var(--c-gizmo-x)"></span>rotation gizmo, X ring</div>
       <div><span class="sw ring" style="border-color:var(--c-gizmo-y)"></span>rotation gizmo, Y ring</div>
       <div><span class="sw ring" style="border-color:var(--c-gizmo-z)"></span>rotation gizmo, Z ring</div>
-      <div style="margin-top:4px">click a model to select it &middot; shift-click it to add a support &middot; ctrl-Z undoes</div>
+      <div style="margin-top:4px">the selected model is solid, the rest are dim &mdash; the chips above show a layer on every model at once</div>
+      <div>click a model to select it &middot; shift-click it to add a support &middot; ctrl-Z undoes</div>
       <div>rotation mode (top left) &mdash; drag a ring on the selected model to turn it</div>
       <div>movement mode (top left) &mdash; drag the selected model to slide it sideways</div>
     </div>
